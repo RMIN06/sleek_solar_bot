@@ -22,16 +22,35 @@ HEADERS = {
     "Content-Type": "application/json"
 }
 
-# Strict Business & Language Rules
+# --- CONVERSATION MEMORY ---
+# This dictionary stores the recent chat history per phone number
+chat_history = {}
+
+def add_to_history(phone, role, content):
+    if phone not in chat_history:
+        chat_history[phone] = []
+    chat_history[phone].append({"role": role, "content": content})
+    # Keep only the last 10 messages to avoid overloading the memory/prompt
+    if len(chat_history[phone]) > 10:
+        chat_history[phone] = chat_history[phone][-10:]
+
+# --- STRICT BUSINESS RULES ---
 SYSTEM_PROMPT = """
 You are an expert, highly professional AI assistant for Sleek Solar International (Pvt) Ltd.
 
-STRICT LANGUAGE & SCRIPT RULES:
-1. SINGLE LANGUAGE MATCHING (DO NOT MIX):
+STRICT BEHAVIOR RULES:
+1. NO UNNECESSARY CONTACT INFO: Do NOT add the contact number (03138666256) at the end of every message. ONLY provide it if the user specifically asks how to contact, requests an exact quote, or needs a site survey.
+2. CONTEXT AWARENESS: You have access to the recent chat history. If a user says "ok", "thanks", or acknowledges a previous calculation, simply reply politely (e.g., "Aap ka shukriya. Agar mazeed kuch poochna ho to batayein."). Do NOT ask for their details or bill again if you already have them.
+3. SINGLE LANGUAGE MATCHING (DO NOT MIX):
    - If the user writes in Roman Urdu, reply ONLY in pure Roman Urdu using English/Latin alphabets. NEVER use native Urdu/Arabic script (Urdu letters like اردو). NEVER mix English sentences into Roman Urdu replies.
-   - If the user writes in English, reply ONLY in pure English. NEVER mix Roman Urdu words into English replies.
-2. CONCISE & ENGAGING: Keep responses direct, polite, and short (2 to 4 sentences maximum).
-3. NO SIGNATURE IN TEXT: Do NOT append any signature or name at the end of your generated text; the system handles the signature automatically.
+   - If the user writes in English, reply ONLY in pure English.
+4. NO SIGNATURE IN TEXT: Do NOT append any signature or name at the end of your generated text; the system handles the signature automatically.
+
+STRICT ANTI-HALLUCINATION PRODUCT CATALOG:
+You must ONLY suggest or mention the exact products listed below. NEVER mention outside brands like Tesla, Pylontech, Growatt, etc. If a customer asks about an unlisted brand, state that we do not carry it and offer our listed alternatives.
+- Solar Panels: Canadian Solar, Jinko, Longi, Risen (710W, 720W, 740W Bifacial technology with 30 Years Warranty).
+- Inverters: Huawei, Maxpower, SAJ, Solis, GoodWe, Inverex (Sizes: 6kW to 110kW Hybrid inverters with 5 Years Warranty).
+- Batteries: Sleek Solar Lithium-Ion batteries.
 
 BILL SCANNING & HISTORICAL UNITS ANALYSIS:
 - Do NOT track total money, expenses, or bill amounts in PKR.
@@ -39,20 +58,12 @@ BILL SCANNING & HISTORICAL UNITS ANALYSIS:
 - Extract the consumed units for all available months shown in the bill table.
 - Calculate the average monthly unit consumption = (Sum of visible monthly units / Number of months).
 - Calculate recommended system size = (Average Monthly Units / 120).
-- Sizing rules:
-  * Size < 5 kW: State that our minimum installation capacity starts at 5 kW.
-  * Size 5 kW to 49 kW: Recommend the exact kW system size and suggest calling 03138666256 for a quotation / site survey.
-  * Size >= 50 kW: Identify as a commercial project and direct them to call 03138666255 (Voice Call Only).
-
-BUSINESS DATA:
-- Company: Sleek Solar International (Pvt) Ltd
-- Address: 622-A Peoples Colony No-1, Faisalabad (9:30 AM - 6:00 PM)
-- Quotations & Surveys: 03138666256
-- Installments: Available through JS Bank.
+- If Size < 5 kW: State that our minimum installation capacity starts at 5 kW.
+- If Size >= 50 kW: Identify as a commercial project and direct them to call 03138666255 (Voice Call Only).
 """
 
 def format_signature(reply_text: str) -> str:
-    """Appends 'Sleek Bot' after a line space (double newline)."""
+    """Appends 'Sleek Bot' after a line space."""
     text = reply_text.strip()
     if text.endswith("Sleek Bot"):
         text = text.rsplit("Sleek Bot", 1)[0].strip()
@@ -69,7 +80,7 @@ def send_whatsapp_message(to_number, text):
     requests.post(url, headers=HEADERS, json=payload)
 
 def analyze_bill_image(media_id, sender_phone):
-    """Background task to analyze bill image for average monthly units"""
+    """Background task to analyze bill image using context history"""
     try:
         media_url_req = requests.get(f"https://graph.facebook.com/v18.0/{media_id}", headers=HEADERS)
         media_url = media_url_req.json().get('url')
@@ -81,26 +92,31 @@ def analyze_bill_image(media_id, sender_phone):
         image_req = requests.get(media_url, headers={"Authorization": f"Bearer {WHATSAPP_TOKEN}"})
         base64_image = base64.b64encode(image_req.content).decode('utf-8')
         
-        prompt = f"""{SYSTEM_PROMPT}
-
-TASK FOR BILL IMAGE:
-1. Examine this electricity bill. Ignore rupees/costs entirely.
-2. Search for the historical monthly units (kWh) table for past months.
-3. Extract the monthly units and calculate the average monthly units consumption.
-4. Calculate required solar system size in kW = (Average Monthly Units / 120).
-5. State the calculated average monthly units, the recommended kW system size, and next steps clearly.
-6. Match the language strictly: Roman Urdu (English alphabet only, NO Urdu script) or English."""
+        # Build the message array with history
+        messages = [{"role": "system", "content": SYSTEM_PROMPT}]
+        if sender_phone in chat_history:
+            messages.extend(chat_history[sender_phone])
+            
+        # Add the image instruction
+        image_instruction = "TASK: Examine this bill image. Ignore PKR costs. Find the historical monthly units table, calculate the average monthly units, and divide by 120 to recommend the kW system size. Reply in the user's language."
+        messages.append({
+            "role": "user", 
+            "content": [
+                {"type": "text", "text": image_instruction},
+                {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{base64_image}"}}
+            ]
+        })
 
         response = client.chat.completions.create(
             model="openrouter/free",
-            messages=[
-                {"role": "user", "content": [
-                    {"type": "text", "text": prompt},
-                    {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{base64_image}"}}
-                ]}
-            ]
+            messages=messages
         )
         raw_reply = response.choices[0].message.content.strip()
+        
+        # Save to history
+        add_to_history(sender_phone, "user", "[User sent an electricity bill photo]")
+        add_to_history(sender_phone, "assistant", raw_reply)
+        
         send_whatsapp_message(sender_phone, format_signature(raw_reply))
 
     except Exception as e:
@@ -108,23 +124,26 @@ TASK FOR BILL IMAGE:
         send_whatsapp_message(sender_phone, format_signature("Apka bill process karne mein masla aya hai. Baraye meherbani saaf tasweer dobara bhejein."))
 
 def get_text_response(msg_text, sender_phone):
-    """Background task for text messages"""
+    """Background task for text messages using context history"""
     try:
-        prompt = f"""{SYSTEM_PROMPT}
-
-USER MESSAGE: "{msg_text}"
-
-TASK:
-- Answer the user's question directly, concisely, and accurately.
-- STRICT LANGUAGE RULE:
-  * If the user wrote in Roman Urdu -> Reply ONLY in Roman Urdu (English alphabet). Do NOT use English sentences or native Urdu script.
-  * If the user wrote in English -> Reply ONLY in English. Do NOT mix Roman Urdu."""
+        # Build the message array with history
+        messages = [{"role": "system", "content": SYSTEM_PROMPT}]
+        if sender_phone in chat_history:
+            messages.extend(chat_history[sender_phone])
+            
+        # Add the new user message
+        messages.append({"role": "user", "content": f'USER MESSAGE: "{msg_text}"'})
 
         response = client.chat.completions.create(
             model="openrouter/free",
-            messages=[{"role": "user", "content": prompt}]
+            messages=messages
         )
         raw_reply = response.choices[0].message.content.strip()
+        
+        # Save to history
+        add_to_history(sender_phone, "user", msg_text)
+        add_to_history(sender_phone, "assistant", raw_reply)
+        
         send_whatsapp_message(sender_phone, format_signature(raw_reply))
 
     except Exception as e:
