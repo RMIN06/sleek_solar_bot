@@ -122,7 +122,7 @@ TASK:
 Provide a clear, direct, polite, and well-formatted answer to the user's message.
 - Calculate load/kW if appliances or units are mentioned.
 - Do NOT repeat unnecessary policies if not asked.
-- Ensure the message strictly ends with ' Sleek Bot'.""
+- Ensure the message strictly ends with ' Sleek Bot'."""
 
         response = client.chat.completions.create(
             model="openrouter/free",
