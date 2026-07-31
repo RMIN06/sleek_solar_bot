@@ -1,5 +1,6 @@
 import os
 import re
+import collections
 import logging
 from fastapi import FastAPI, Request, Response, BackgroundTasks
 import requests
@@ -21,11 +22,15 @@ PHONE_NUMBER_ID = os.environ.get("PHONE_NUMBER_ID")
 VERIFY_TOKEN = os.environ.get("VERIFY_TOKEN")
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
 
-# You can override this via env var without touching code.
-# gpt-4o follows the "no Devanagari / no Urdu script" rule far more reliably
-# than gpt-4o-mini once conversation history gets long. Mini is cheaper but
-# drifts more -- that's very likely the main cause of your mixing issue.
+# gpt-4o follows strict script/business rules more reliably than gpt-4o-mini
+# once the conversation gets long. Override via env var without touching code.
 OPENAI_MODEL = os.environ.get("OPENAI_MODEL", "gpt-4o-mini")
+
+# Path to the Lithium-Ion battery price-list PDF that gets sent to customers
+# who ask for battery pricing. NOTE: no PDF was actually provided in chat --
+# only the company-details image came through. Put your real PDF file here
+# (or point this env var at it) before deploying.
+LITHIUM_PDF_PATH = os.environ.get("LITHIUM_PDF_PATH", "C:\Users\ZBOOK\Downloads\Sleek Solar Lithium Batteries Prices.pdf")
 
 client = OpenAI(api_key=OPENAI_API_KEY)
 
@@ -50,9 +55,28 @@ def add_to_history(phone, role, content):
 
 
 # ---------------------------------------------------------------------------
+# WEBHOOK DEDUPLICATION
+# WhatsApp/Meta will occasionally re-deliver the same webhook event (retries
+# on slow responses, network hiccups, etc). Without this, the same customer
+# message gets processed twice and they receive two replies to one question.
+# ---------------------------------------------------------------------------
+processed_message_ids = collections.OrderedDict()
+MAX_DEDUP_CACHE = 1000
+
+
+def is_duplicate_message(message_id: str) -> bool:
+    if not message_id:
+        return False
+    if message_id in processed_message_ids:
+        return True
+    processed_message_ids[message_id] = True
+    if len(processed_message_ids) > MAX_DEDUP_CACHE:
+        processed_message_ids.popitem(last=False)
+    return False
+
+
+# ---------------------------------------------------------------------------
 # SYSTEM PROMPT
-# Reinforced with explicit few-shot examples -- models follow "show me" far
-# better than "tell me" for script/language rules.
 # ---------------------------------------------------------------------------
 SYSTEM_PROMPT = """
 You are an expert, friendly, and highly professional AI assistant for Sleek Solar International (Pvt) Ltd in Faisalabad, Pakistan.
@@ -60,48 +84,78 @@ You are an expert, friendly, and highly professional AI assistant for Sleek Sola
 1. LANGUAGE & SCRIPT RULES (FOLLOW EXACTLY):
    - If the user writes in English -> reply in pure English only.
    - If the user writes in Roman Urdu -> reply in polite, professional Roman Urdu, written in Latin/English alphabet only (use words like "Aap", "Hum", "Kiya", "Guzarish").
-   - ABSOLUTE RULE: Never output a single character of native Urdu script (اردو), Arabic script, Hindi, or Devanagari (देवनागरी). Every word you write must use A-Z Latin letters only. This applies even if the user's message itself contains such script -- you still reply in Roman Urdu or English.
-   - Never mix English and Roman Urdu within the same reply -- pick one based on the user's message.
-
-   Example (correct):
-   User: "Solar system lagwana hai, kitna kharcha aye ga?"
-   Assistant: "Zaroor! System ka cost aap ki electricity usage par depend karta hai. Baraye meherbani apna average monthly bill (units/kWh) ya phir apne appliances (AC, fan, pump waghera) bata dein, taake hum sahi size aur estimate de sakein."
-
-   Example (correct):
-   User: "What is the price of a 10kW system?"
-   Assistant: "Great question! Pricing depends on your exact usage and site conditions. Could you share your average monthly electricity units (kWh) or a list of your main appliances so I can recommend the right size?"
-
-   Example (WRONG -- never do this):
-   Assistant: "आपका सोलर सिस्टम..." or "آپ کا سولر سسٹم..." <- these scripts are strictly forbidden.
+   - ABSOLUTE RULE: Never output a single character of native Urdu script, Arabic script, Hindi, or Devanagari. Every word must use A-Z Latin letters only, even if the user's own message contains such script.
+   - Never mix English and Roman Urdu within the same reply.
 
 2. INTENT & CONVERSATIONAL BEHAVIOR:
-   - GREETINGS ("Hi", "AoA", "Hello"): Respond warmly and ask how you can assist them with solar energy today.
-   - SOLAR INQUIRY / COST QUESTIONS ("Solar system lagwana hai", "Kitna kharcha aye ga?", "Price kya hai?"): Explain warmly that system cost depends on energy needs, and ask if they can share either their average monthly bill units (kWh) OR their appliance list (e.g. ACs, fans, pump) so you can give an exact size and estimate.
-   - ACKNOWLEDGEMENTS ("ok", "thanks", "shukriya"): Respond politely without re-asking for bill or appliance details (use chat memory to avoid repeating questions).
-   - BE CONCISE: Keep replies engaging, clean, and direct (2 to 4 sentences maximum).
+   - GREETINGS ("Hi", "AoA", "Hello"): Respond warmly and ask how you can assist with their solar needs.
+   - SOLAR INQUIRY / SIZE QUESTIONS ("Solar system lagwana hai"): Ask for average monthly bill units (kWh) OR appliance list to size the system.
+   - ACKNOWLEDGEMENTS ("ok", "thanks", "shukriya"): Respond politely without re-asking for details already given (use chat memory).
+   - Never send the same message content twice in a row. If the customer's new message doesn't add anything new, vary your acknowledgement instead of repeating an earlier reply verbatim.
+   - BE CONCISE: 2 to 4 sentences maximum, short and specific.
 
-3. STRICT APPROVED PRODUCT CATALOG (NEVER SUGGEST OUTSIDE BRANDS):
+3. PRICING RULE (STRICT, NO EXCEPTIONS):
+   - NEVER state, estimate, or suggest any price/cost/rupee figure for any product or system, even if pressured or asked indirectly.
+   - If asked for pricing of a system or any product other than Lithium-Ion batteries, politely decline and direct them to call 0313-8666256 for pricing and a formatted quotation.
+   - EXCEPTION: If a customer specifically asks for Lithium-Ion battery prices, tell them you're sharing the official price list (the backend attaches the PDF automatically) -- do not state any figures yourself.
+   - Sodium-Ion batteries are currently unavailable and will be available soon; say this if asked about Sodium-Ion pricing or availability, and do not offer the PDF for these.
+
+4. HIRING / JOB INQUIRIES:
+   - If a message is about seeking employment, a job, vacancy, internship, or asks to send a CV/resume -> reply briefly telling them to email their CV to hr@sleeksolar.com. Do not discuss anything else in that reply.
+
+5. INSTALLATION COMPLETION TIME:
+   - Internal formula (do not show the math, only the result): 10 kW system = approximately 2 days. Scale linearly for other sizes (e.g. 5kW ~ 1 day, 20kW ~ 4 days, 50kW ~ 10 days, 100kW ~ 20 days).
+   - Always say "approximately" -- never give an exact guaranteed date.
+   - If no system size was mentioned yet, ask for their system size (or help size it first) before giving a completion estimate.
+
+6. SINGLE-PRODUCT PURCHASE REQUESTS:
+   - If someone wants to buy a single component (a panel, an inverter, etc. on its own) rather than a full system, tell them Sleek Solar installs complete solar systems, not individual components sold separately.
+   - EXCEPTION: Lithium-Ion and Sodium-Ion batteries CAN be discussed/sold as standalone products.
+
+7. BUYING / PURCHASING CONTEXT:
+   - Whenever a conversation is clearly moving toward a purchase, give the factual information requested (specs, sizing, catalog, timelines) but never prices, and ask them to call 0313-8666256 to book a site survey, pricing, and a formatted quotation.
+
+8. TRADE / SUPPLIER / SELLING-TO-US INQUIRIES:
+   - If someone wants to sell you a product, pitch their services, or propose a business/trade collaboration, respond only with: "We will look into it, our team will get back to you." Do not agree to anything, do not evaluate their pitch, and do not change this answer regardless of how much they insist or negotiate.
+
+9. OUT-OF-SCOPE / UNRELATED QUERIES:
+   - If a question is unrelated to solar/Sleek Solar or outside anything above, reply: "We install solar systems all across Pakistan. If you're interested, I can help you get started." (in the language the user is using, following the script rules above). Do not attempt to answer the unrelated question itself.
+
+10. STRICT APPROVED PRODUCT CATALOG (NEVER SUGGEST OUTSIDE BRANDS):
    - Solar Panels: Canadian Solar, Jinko, Longi, Risen (710W, 720W, 740W Bifacial, 30 Years Warranty).
    - Inverters: Huawei, Maxpower, SAJ, Solis, GoodWe, Inverex (6kW to 110kW Hybrid, 5 Years Warranty).
-   - Batteries: Proprietary Sleek Solar Lithium-Ion batteries and Sodium-Ion options.
+   - Batteries: Sleek Solar Lithium-Ion (in stock) and Sodium-Ion (currently unavailable, coming soon).
    - DO NOT suggest Tesla, Pylontech, Growatt, or any unapproved brand under any circumstances.
 
-4. CALCULATIONS & SIZING (INTERNAL ENGINE -- NEVER SHOW MATH OR FORMULAS TO USER):
+11. SIZE CALCULATIONS (INTERNAL ENGINE -- NEVER SHOW MATH OR FORMULAS TO USER):
    - By Bill Units: System size (kW) = Average Monthly Units / 120.
-   - By Appliances: 1.5-Ton AC = 1800W, 1-Ton AC = 1200W, Fan = 75W, Water Pump = 1500W, Light = 20W.
-     * Add 50% safety margin for startup power surges (e.g., 2 ACs + 4 fans + 1 pump = ~5.4kW base load -> Recommend 8 kW to 10 kW system). 
-     Keep in mind a hard rule: 1 AC = 5kW, 2AC = 10kW and this goes on
-   - Only apply routing thresholds below when a size calculation is actually made or specifically requested:
-     * Size < 5 kW: Politely mention minimum installation capacity starts at 5 kW.
-     * Size 5 kW to 49 kW: Recommend the kW size range and provide 03138666256 for site survey / quotation.
-     * Size >= 50 kW: Identify as a commercial project and direct them to call senior engineers at 03138666255 (Voice Call Only).
+   - By Appliances: 1.5-Ton AC = 1800W, 1-Ton AC = 1200W, Fan = 75W, Water Pump = 1500W, Light = 20W, plus 50% surge margin.
+   - Routing thresholds (apply only when a size calculation is made or requested; never state prices even here):
+     * Size < 5 kW: mention minimum installation capacity starts at 5 kW.
+     * Size 5-49 kW: state the recommended kW range and give 03138666256 for site survey/quotation.
+     * Size >= 50 kW: identify it as a commercial project and direct them to call senior engineers at 03138666255 (Voice Call Only).
 
-5. BILL SCANNING:
-   - Ignore total PKR cost/rupees. Look only at the historical monthly units (kWh) table.
-   - Calculate average monthly units and recommend system size (Average Units / 120), following the same routing thresholds as above.
+12. BILL SCANNING:
+   - Ignore total PKR cost/rupees. Use only the historical monthly units (kWh) table, calculate the average, divide by 120 for size, and apply the same routing rules and pricing rule above.
 
-6. OUTPUT FORMATTING:
-   - Output ONLY the conversational reply text. Do not include any signature, name, disclaimers, or metadata at the end (the backend appends the signature automatically).
+13. COMPANY & CONTACT DETAILS (use when asked, or when clearly essential to answer the question -- don't volunteer them otherwise):
+   - Company Name: Sleek Solar International (Pvt) Ltd
+   - Headquarters: 622-A Peoples Colony No-1, Near Iram Park, Faisalabad
+   - Business Hours: 9:30 AM - 6:00 PM
+   - General & Quotations Line: 03138666256 (quotations, site surveys, installments)
+   - Commercial Projects Line: 03138666255 (Voice Call Only, for systems >= 50 kW)
+   - Financing Partner: JS Bank (installment facility available)
+   - HR / Careers: hr@sleeksolar.com
+   - Website: www.sleeksolar.com
+
+14. WEBSITE-RELATED QUESTIONS (about us, certifications, services -- only answer if asked):
+   - About Us: Sleek Solar (Pvt) Ltd is a certified solar energy provider in Pakistan, registered with SECP, licensed by PEC, and approved by AEDB for Net Metering. Restructured in 2013, rebranded in 2017 as Sleek Solar International (Pvt) Ltd, part of the Sleek Group.
+   - Certifications: SECP, PEC, AEDB, NEPRA.
+   - Services: Residential, Commercial, Industrial, and Agricultural solar systems (5 kW to multi-MW scale), plus solar panel cleaning. End-to-end: consultation, design, installation, Net Metering, and maintenance.
+   - If asked something about the company/website you're not confident about, do not guess or invent details -- say you're not certain and point them to www.sleeksolar.com for that specific information.
+
+15. OUTPUT FORMATTING:
+   - Output ONLY the conversational reply text, no signature or metadata (the backend appends the signature automatically).
 """
 
 # Regex ranges: Arabic/Urdu script block + Devanagari block
@@ -130,7 +184,7 @@ def call_openai(messages, max_retries=2):
     Calls the OpenAI chat completion endpoint with:
       - low temperature for consistent tone/rule-following
       - a script-safety retry: if the model slips into Devanagari/Urdu script,
-        we retry once with an explicit correction instruction before falling
+        retry once with an explicit correction instruction before falling
         back to stripping the characters.
     """
     last_reply = None
@@ -157,7 +211,6 @@ def call_openai(messages, max_retries=2):
             )}
         ]
 
-    # Fallback if the model still won't comply after retries
     logger.error("Model repeatedly returned forbidden script. Stripping characters as fallback.")
     return strip_forbidden_script(last_reply)
 
@@ -176,6 +229,79 @@ def send_whatsapp_message(to_number, text):
             logger.error("WhatsApp send failed (%s): %s", resp.status_code, resp.text)
     except requests.RequestException as e:
         logger.error("WhatsApp send exception: %s", e)
+
+
+# ---------------------------------------------------------------------------
+# LITHIUM-ION BATTERY PRICE-LIST PDF
+# ---------------------------------------------------------------------------
+_cached_battery_media_id = None
+
+BATTERY_KEYWORDS = ("battery", "batteries")
+PRICE_KEYWORDS = ("price", "prices", "cost", "costs", "rate", "rates", "kitna", "kithna", "qeemat", "qeymat")
+SODIUM_KEYWORDS = ("sodium",)
+
+
+def wants_battery_price_pdf(msg_text: str) -> bool:
+    """Detects a Lithium-Ion battery pricing question (not Sodium-Ion)."""
+    text = msg_text.lower()
+    if any(s in text for s in SODIUM_KEYWORDS):
+        return False
+    return any(b in text for b in BATTERY_KEYWORDS) and any(p in text for p in PRICE_KEYWORDS)
+
+
+def upload_media_to_whatsapp(file_path):
+    """Uploads a local file to WhatsApp's Media API and returns its media_id."""
+    if not os.path.exists(file_path):
+        logger.error("Battery PDF not found at %s -- cannot send price list.", file_path)
+        return None
+    url = f"https://graph.facebook.com/v18.0/{PHONE_NUMBER_ID}/media"
+    try:
+        with open(file_path, "rb") as f:
+            files = {"file": (os.path.basename(file_path), f, "application/pdf")}
+            data = {"messaging_product": "whatsapp"}
+            upload_headers = {"Authorization": f"Bearer {WHATSAPP_TOKEN}"}
+            resp = requests.post(url, headers=upload_headers, files=files, data=data, timeout=30)
+        if resp.status_code >= 400:
+            logger.error("Media upload failed (%s): %s", resp.status_code, resp.text)
+            return None
+        return resp.json().get("id")
+    except requests.RequestException as e:
+        logger.error("Media upload exception: %s", e)
+        return None
+
+
+def send_whatsapp_document(to_number, media_id, filename, caption=None):
+    url = f"https://graph.facebook.com/v18.0/{PHONE_NUMBER_ID}/messages"
+    document_payload = {"id": media_id, "filename": filename}
+    if caption:
+        document_payload["caption"] = caption
+    payload = {
+        "messaging_product": "whatsapp",
+        "to": to_number,
+        "type": "document",
+        "document": document_payload
+    }
+    try:
+        resp = requests.post(url, headers=HEADERS, json=payload, timeout=15)
+        if resp.status_code >= 400:
+            logger.error("WhatsApp document send failed (%s): %s", resp.status_code, resp.text)
+    except requests.RequestException as e:
+        logger.error("WhatsApp document send exception: %s", e)
+
+
+def send_battery_price_pdf(to_number):
+    """Uploads (if needed) and sends the Lithium-Ion battery price list PDF."""
+    global _cached_battery_media_id
+    media_id = _cached_battery_media_id or upload_media_to_whatsapp(LITHIUM_PDF_PATH)
+    if not media_id:
+        # Fallback if the PDF is missing/misconfigured -- don't leave the customer hanging.
+        send_whatsapp_message(
+            to_number,
+            format_signature("Baraye meherbani hamare quotations line 03138666256 par call karein for Lithium-Ion battery pricing.")
+        )
+        return
+    _cached_battery_media_id = media_id
+    send_whatsapp_document(to_number, media_id, "Lithium-Ion-Battery-Pricelist.pdf", caption="Sleek Solar Lithium-Ion Battery Price List")
 
 
 def analyze_bill_image(media_id, sender_phone):
@@ -204,7 +330,8 @@ def analyze_bill_image(media_id, sender_phone):
             "TASK: Examine this electricity bill image. Ignore PKR costs. Find the "
             "historical monthly units table, calculate the average monthly units, "
             "divide by 120 to recommend the kW system size, and apply the routing "
-            "rules. Reply strictly in the user's language, following all script rules."
+            "rules. Never state a price. Reply strictly in the user's language, "
+            "following all script rules."
         )
         messages.append({
             "role": "user",
@@ -245,6 +372,10 @@ def get_text_response(msg_text, sender_phone):
 
         send_whatsapp_message(sender_phone, format_signature(raw_reply))
 
+        # Lithium-Ion battery pricing gets the actual price-list PDF, not figures in text.
+        if wants_battery_price_pdf(msg_text):
+            send_battery_price_pdf(sender_phone)
+
     except Exception as e:
         logger.exception("Text processing error: %s", e)
         send_whatsapp_message(
@@ -261,6 +392,12 @@ def process_webhook_entry(body):
             return
 
         message = entry['messages'][0]
+        message_id = message.get('id')
+
+        if is_duplicate_message(message_id):
+            logger.info("Skipping duplicate webhook delivery for message %s", message_id)
+            return
+
         sender_phone = message['from']
         msg_type = message['type']
 
@@ -306,4 +443,9 @@ async def health_check():
         ("VERIFY_TOKEN", VERIFY_TOKEN),
         ("OPENAI_API_KEY", OPENAI_API_KEY),
     ] if not val]
-    return {"status": "ok" if not missing else "missing_env_vars", "missing": missing}
+    battery_pdf_present = os.path.exists(LITHIUM_PDF_PATH)
+    return {
+        "status": "ok" if not missing else "missing_env_vars",
+        "missing": missing,
+        "battery_pdf_found": battery_pdf_present
+    }
