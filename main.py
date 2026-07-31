@@ -10,11 +10,11 @@ app = FastAPI()
 WHATSAPP_TOKEN = os.environ.get("WHATSAPP_TOKEN")
 PHONE_NUMBER_ID = os.environ.get("PHONE_NUMBER_ID")
 VERIFY_TOKEN = os.environ.get("VERIFY_TOKEN")
-OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY")
+OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
 
+# Initialize official OpenAI client
 client = OpenAI(
-    base_url="https://openrouter.ai/api/v1",
-    api_key=OPENROUTER_API_KEY,
+    api_key=OPENAI_API_KEY,
 )
 
 HEADERS = {
@@ -23,43 +23,36 @@ HEADERS = {
 }
 
 # --- CONVERSATION MEMORY ---
-# This dictionary stores the recent chat history per phone number
 chat_history = {}
 
 def add_to_history(phone, role, content):
     if phone not in chat_history:
         chat_history[phone] = []
     chat_history[phone].append({"role": role, "content": content})
-    # Keep only the last 10 messages to avoid overloading the memory/prompt
     if len(chat_history[phone]) > 10:
         chat_history[phone] = chat_history[phone][-10:]
 
 # --- STRICT BUSINESS RULES ---
 SYSTEM_PROMPT = """
-You are an expert, highly professional AI assistant for Sleek Solar International (Pvt) Ltd.
+You are an AI assistant for Sleek Solar. 
 
-STRICT BEHAVIOR RULES:
-1. NO UNNECESSARY CONTACT INFO: Do NOT add the contact number (03138666256) at the end of every message. ONLY provide it if the user specifically asks how to contact, requests an exact quote, or needs a site survey.
-2. CONTEXT AWARENESS: You have access to the recent chat history. If a user says "ok", "thanks", or acknowledges a previous calculation, simply reply politely (e.g., "Aap ka shukriya. Agar mazeed kuch poochna ho to batayein."). Do NOT ask for their details or bill again if you already have them.
-3. SINGLE LANGUAGE MATCHING (DO NOT MIX):
-   - If the user writes in Roman Urdu, reply ONLY in pure Roman Urdu using English/Latin alphabets. NEVER use native Urdu/Arabic script (Urdu letters like اردو). NEVER mix English sentences into Roman Urdu replies.
-   - If the user writes in English, reply ONLY in pure English.
-4. NO SIGNATURE IN TEXT: Do NOT append any signature or name at the end of your generated text; the system handles the signature automatically.
+CRITICAL RULES:
+1. STRICT LANGUAGE MATCH: 
+   - If user asks in English -> Reply ONLY in pure English. 
+   - If user asks in Roman Urdu -> Reply ONLY in pure Roman Urdu.
+   - NO HINDI. NO DEVANAGARI SCRIPT. NO NATIVE URDU/ARABIC SCRIPT. Use English alphabets only.
+2. BE EXTREMELY SHORT & SPECIFIC: Answer ONLY the exact question asked. Maximum 2 sentences. 
+3. DO NOT ASK FOR MORE INFO: Do NOT ask for their bill, load, or appliances unless they explicitly ask for a system size or price estimate. If they just say "Hi", just say "Hello, how can I help?".
+4. NO UNREQUESTED DATA: Do NOT give phone numbers or minimum kW limits unless directly asked.
 
-STRICT ANTI-HALLUCINATION PRODUCT CATALOG:
-You must ONLY suggest or mention the exact products listed below. NEVER mention outside brands like Tesla, Pylontech, Growatt, etc. If a customer asks about an unlisted brand, state that we do not carry it and offer our listed alternatives.
-- Solar Panels: Canadian Solar, Jinko, Longi, Risen (710W, 720W, 740W Bifacial technology with 30 Years Warranty).
-- Inverters: Huawei, Maxpower, SAJ, Solis, GoodWe, Inverex (Sizes: 6kW to 110kW Hybrid inverters with 5 Years Warranty).
-- Batteries: Sleek Solar Lithium-Ion batteries.
+STRICT PRODUCT CATALOG (NEVER SUGGEST OTHER BRANDS):
+- Solar Panels: Canadian Solar, Jinko, Longi, Risen (710W, 720W, 740W Bifacial).
+- Inverters: Huawei, Maxpower, SAJ, Solis, GoodWe, Inverex (6kW to 110kW).
+- Batteries: Sleek Solar Lithium-Ion and Sodium-Ion batteries. (NEVER suggest Tesla, Pylontech, or other external brands).
 
-BILL SCANNING & HISTORICAL UNITS ANALYSIS:
-- Do NOT track total money, expenses, or bill amounts in PKR.
-- Look specifically at the historical monthly consumption table on the electricity bill (kWh / units consumed in past months).
-- Extract the consumed units for all available months shown in the bill table.
-- Calculate the average monthly unit consumption = (Sum of visible monthly units / Number of months).
-- Calculate recommended system size = (Average Monthly Units / 120).
-- If Size < 5 kW: State that our minimum installation capacity starts at 5 kW.
-- If Size >= 50 kW: Identify as a commercial project and direct them to call 03138666255 (Voice Call Only).
+SIZING KNOWLEDGE:
+- System Size (kW) = Average Monthly Units / 120.
+- Min install: 5 kW. Commercial: 50 kW+.
 """
 
 def format_signature(reply_text: str) -> str:
@@ -92,13 +85,11 @@ def analyze_bill_image(media_id, sender_phone):
         image_req = requests.get(media_url, headers={"Authorization": f"Bearer {WHATSAPP_TOKEN}"})
         base64_image = base64.b64encode(image_req.content).decode('utf-8')
         
-        # Build the message array with history
         messages = [{"role": "system", "content": SYSTEM_PROMPT}]
         if sender_phone in chat_history:
             messages.extend(chat_history[sender_phone])
             
-        # Add the image instruction
-        image_instruction = "TASK: Examine this bill image. Ignore PKR costs. Find the historical monthly units table, calculate the average monthly units, and divide by 120 to recommend the kW system size. Reply in the user's language."
+        image_instruction = "TASK: Examine this bill image. Ignore PKR costs. Find the historical monthly units table, calculate the average monthly units, and divide by 120 to recommend the kW system size. Reply strictly in the user's language."
         messages.append({
             "role": "user", 
             "content": [
@@ -107,13 +98,13 @@ def analyze_bill_image(media_id, sender_phone):
             ]
         })
 
+        # Upgraded to gpt-4o-mini
         response = client.chat.completions.create(
-            model="openrouter/free",
+            model="gpt-4o-mini",
             messages=messages
         )
         raw_reply = response.choices[0].message.content.strip()
         
-        # Save to history
         add_to_history(sender_phone, "user", "[User sent an electricity bill photo]")
         add_to_history(sender_phone, "assistant", raw_reply)
         
@@ -126,21 +117,19 @@ def analyze_bill_image(media_id, sender_phone):
 def get_text_response(msg_text, sender_phone):
     """Background task for text messages using context history"""
     try:
-        # Build the message array with history
         messages = [{"role": "system", "content": SYSTEM_PROMPT}]
         if sender_phone in chat_history:
             messages.extend(chat_history[sender_phone])
             
-        # Add the new user message
         messages.append({"role": "user", "content": f'USER MESSAGE: "{msg_text}"'})
 
+        # Upgraded to gpt-4o-mini
         response = client.chat.completions.create(
-            model="openrouter/free",
+            model="gpt-4o-mini",
             messages=messages
         )
         raw_reply = response.choices[0].message.content.strip()
         
-        # Save to history
         add_to_history(sender_phone, "user", msg_text)
         add_to_history(sender_phone, "assistant", raw_reply)
         
