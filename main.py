@@ -30,7 +30,7 @@ OPENAI_MODEL = os.environ.get("OPENAI_MODEL", "gpt-4o-mini")
 # who ask for battery pricing. NOTE: no PDF was actually provided in chat --
 # only the company-details image came through. Put your real PDF file here
 # (or point this env var at it) before deploying.
-LITHIUM_PDF_PATH = os.environ.get("LITHIUM_PDF_PATH", "Sleek Solar Lithium Batteries Prices.pdf")
+LITHIUM_PDF_PATH = os.environ.get("LITHIUM_PDF_PATH", "batteries_price.pdf")
 
 client = OpenAI(api_key=OPENAI_API_KEY)
 
