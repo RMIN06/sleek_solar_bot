@@ -25,7 +25,7 @@ OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
 # gpt-4o follows the "no Devanagari / no Urdu script" rule far more reliably
 # than gpt-4o-mini once conversation history gets long. Mini is cheaper but
 # drifts more -- that's very likely the main cause of your mixing issue.
-OPENAI_MODEL = os.environ.get("OPENAI_MODEL", "gpt-4o")
+OPENAI_MODEL = os.environ.get("OPENAI_MODEL", "gpt-4o-mini")
 
 client = OpenAI(api_key=OPENAI_API_KEY)
 
