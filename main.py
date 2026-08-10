@@ -33,13 +33,16 @@ QUOTATION_PDFS = {
 BATTERY_PDF = "batteries_price.pdf"
 DISTRIBUTOR_PDF = "distributors.pdf"
 
+# Battery sizes we offer
+BATTERY_SIZES = ['6', '8', '10', '16']
+
 def detect_quotation_request(text):
     """Detect if user is asking for a system quotation vs battery price"""
     text_lower = text.lower()
 
     # Check for system quotation keywords
     system_keywords = ['system', 'quotation', 'quote', 'price', 'cost', 'kit', 'complete', 'setup', 'installation', 'hybrid system', 'solar system']
-    battery_keywords = ['battery', 'batteries', 'storage', 'kwh', 'kwhr', 'backup', 'lithium', 'sodium']
+    battery_keywords = ['battery', 'batteries', 'storage', 'kwh', 'kwhr', 'backup', 'lithium']
 
     # Extract kW/kWh mentions
     kw_matches = re.findall(r'(\d+)\s*kw\b', text_lower)
@@ -71,60 +74,34 @@ def detect_distributor_inquiry(text):
     distributor_keywords = ['distributor', 'dealership', 'dealer', 'partnership', 'wholesale', 'distributer', 'distributorship']
     return any(kw in text.lower() for kw in distributor_keywords)
 
+def detect_loan_inquiry(text):
+    """Detect if user is asking about loan/financing"""
+    loan_keywords = ['loan', 'financing', 'finance', 'installment', 'installments', 'emi', 'js bank', 'bank', 'loan facility']
+    return any(kw in text.lower() for kw in loan_keywords)
+
 # Master Business Knowledge & Behavior Rules Prompt
 SYSTEM_PROMPT = """
 You are an expert, courteous, and highly professional AI customer assistant for Sleek Solar International (Pvt) Ltd.
 
 CORE OUTPUT RULES:
 1. DIRECT REPLIES ONLY: Answer ONLY what the user asked. DO NOT dump general policies, minimum capacity rules, or contact numbers UNLESS specifically asked.
-2. SYSTEM SIGNATURE: Every single output MUST end with a space followed by 'Sleek Bot' at the very end.
+2. SYSTEM SIGNATURE: Every single output MUST end with a blank line followed by 'Sleek Bot' at the very end.
 3. CLEAN OUTPUT: Never output safety ratings, JSON code, or system logs. Output ONLY the conversational message meant for WhatsApp.
-4. LANGUAGE & TONE: Use crisp, polite, and professional language.
-   - If the user writes in Roman Urdu, respond in elegant, grammatically correct Roman Urdu (use "Aap", "Kiya", "Humari", "Guzarish", etc.).
-   - If in English, respond in clear professional English.
-5. FORMATTING: Use structured bullet points and clean spacing when providing lists of products.
-6. KEEP REPLIES CONCISE, SPECIFIC TO CLIENT'S NEED.
-
-BUSINESS DATA:
-- Company Name: Sleek Solar International (Pvt) Ltd
-- Office Location: 622-A Peoples Colony No-1, Near Iram Park, Faisalabad
-- Office Timings: 9:30 AM to 6:00 PM
-
-PRODUCTS CATALOGUE:
-- Solar Panels: Canadian Solar, Jinko, Longi, Risen (580W-740W Bifacial technology with 30 Years Warranty).
-- Inverters: Huawei, Maxpower, SAJ, Solis, GoodWe, Inverex (Sizes: 5kW, 6kW, 8kW, 10kW, 15kW, 20kW up to 110kW Hybrid inverters with 5 Years Warranty).
-- Batteries: Sleek Solar Lithium-Ion batteries (5kWh to 20kWh), Sodium-Ion currently not available.
-
-SIZING & CALCULATION ENGINE:
-- Calculation by Bill Units: Recommended kW = (Monthly Units / 120).
-- Calculation by Load/Appliances:
-  * Air Conditioner (1.5 Ton) = 1800W
-  * Fan = 75W
-  * Water Motor / Pump = 1500W
-  * Light = 20W
-  * Calculate running load, add a 50% safety/surge margin to handle motor startup power so system won't trip.
-  * Example: 2 ACs (3600W) + 4 Fans (300W) + 1 Motor (1500W) = 5400W base load -> Recommend an 8 kW to 10 kW system.
-
-PRICING RULES (STRICT):
-- NEVER state, estimate, or suggest any price/cost/rupee figure for any product or system in text replies.
-- For system quotations (5kW, 6kW, 8kW, 10kW): The system sends the standard quotation PDF. You just mention that the standard quotation is being shared and exact quotation will be provided after site visit.
-- For battery prices: The system sends batteries_price.pdf. You just mention the battery price list is being shared.
-- For distributor inquiries: The system sends distributors.pdf. You politely ask about their business.
-
-QUOTATION HANDLING:
-- Standard quotations available for 5kW, 6kW, 8kW, 10kW systems (PDF sent automatically)
-- Battery price list available (batteries_price.pdf sent automatically)
-- Distributor information available (distributors.pdf sent automatically)
-- Exact quotations only after site visit
-
-DISTRIBUTOR INQUIRIES:
-- If user asks about becoming a distributor, dealership, partnership, or wholesale
-- Politely share distributors.pdf and ask about their business background
-- Keep it professional and engaging
-
-COMMERCIAL PROJECTS:
-- Handle all sizes (no upper limit restriction)
-- For large projects, provide guidance and offer site visit
+4. LANGUAGE & TONE:
+   - If the user writes in English, respond in clear professional English ONLY.
+   - If the user writes in Roman Urdu (Urdu written in English letters), respond in elegant, grammatically correct Roman Urdu ONLY (use "Aap", "Kiya", "Humari", "Guzarish", etc.).
+   - NEVER use native Urdu script, Arabic script, or any other language.
+   - Match the user's language exactly.
+5. RESPONSE STYLE: Be extremely concise, specific to client's need only. Do not add extra information the user didn't ask for. Do not cite products/brands not mentioned by user.
+6. BRANDS/PRODUCTS: Only mention these approved brands when relevant:
+   - Solar Panels: Canadian Solar, Jinko, Longi, Risen (580W-740W Bifacial, 30 Years Warranty)
+   - Inverters: Huawei, Maxpower, SAJ, Solis, GoodWe, Inverex (5kW-110kW Hybrid, 5 Years Warranty)
+   - Batteries: Sleek Solar Lithium-Ion (6kWh, 8kWh, 10kWh, 16kWh)
+7. PRICING: NEVER state any price/cost/rupee figure in text. PDFs handle pricing.
+8. LOAN: If asked about loan/financing/installment, say: "Loaning can be done through JS Bank."
+9. SYSTEM SIZING (HARD RULE): 1.5 Ton AC = 5kW system required. Calculate based on this formula.
+10. UNKNOWN INFO: If you don't know something, do not guess. Do not provide the information.
+11. EXACT QUOTATION: Only after site visit.
 """
 
 def analyze_bill_image(media_id):
@@ -135,7 +112,7 @@ def analyze_bill_image(media_id):
         media_url = media_url_req.json().get('url')
 
         if not media_url:
-            return "Bill scan failed. Please re-send a clear photo of your electricity bill. Sleek Bot"
+            return "Bill scan failed. Please re-send a clear photo of your electricity bill.\n\nSleek Bot"
 
         # 2. Download Image Bytes
         image_req = requests.get(media_url, headers={"Authorization": f"Bearer {WHATSAPP_TOKEN}"})
@@ -146,13 +123,12 @@ def analyze_bill_image(media_id):
 TASK:
 Examine this electricity bill image carefully.
 1. Extract the monthly consumed units.
-2. Calculate the required system size (Units / 120).
-3. Provide the accurate recommendation based on Sizing Rules.
-4. Reply in clear, professional Roman Urdu or English depending on context.
-5. Keep response concise and specific to client's need.
-6. Suggest appropriate system size from 5kW, 6kW, 8kW, 10kW options.
-7. Do NOT mention any prices.
-Ensure the message ends with ' Sleek Bot'."""
+2. Calculate the required system size using: 1.5 Ton AC = 5kW system (hard rule).
+3. Recommend appropriate system size from 5kW, 6kW, 8kW, 10kW options.
+4. Reply in user's language (English or Roman Urdu only).
+5. Be extremely concise and specific.
+6. Do NOT mention any prices.
+7. Ensure the message ends with a blank line then 'Sleek Bot'."""
 
         response = client.chat.completions.create(
             model="gpt-4o-mini",
@@ -168,14 +144,14 @@ Ensure the message ends with ' Sleek Bot'."""
         )
         reply = response.choices[0].message.content.strip()
 
-        # Enforce suffix
+        # Enforce suffix with blank line
         if not reply.endswith("Sleek Bot"):
-            reply = reply + " Sleek Bot"
+            reply = reply + "\n\nSleek Bot"
         return reply
 
     except Exception as e:
         print(f"Vision Processing Error: {e}")
-        return "Apka bill process nahi ho saka. Baraye meherbani saaf tasweer dobara bhejein. Sleek Bot"
+        return "Apka bill process nahi ho saka. Baraye meherbani saaf tasweer dobara bhejein.\n\nSleek Bot"
 
 def get_text_response(msg_text):
     """Handles text messages and Roman Urdu using AI"""
@@ -185,13 +161,14 @@ def get_text_response(msg_text):
 USER MESSAGE: "{msg_text}"
 
 TASK:
-Provide a clear, direct, polite, and concise answer to the user's message.
-- Calculate load/kW if appliances or units are mentioned.
+Provide a clear, direct, polite, and extremely concise answer.
+- Calculate load/kW if appliances or units mentioned using: 1.5 Ton AC = 5kW system.
 - Suggest appropriate system (5kW, 6kW, 8kW, 10kW) based on calculation.
-- Do NOT provide any prices - PDFs are sent separately for quotations/batteries.
-- Do NOT repeat unnecessary policies if not asked.
-- Keep replies concise and specific to client's need.
-- Ensure the message strictly ends with ' Sleek Bot'."""
+- Do NOT provide any prices.
+- Do NOT mention brands/products user didn't ask about.
+- Match user's language (English or Roman Urdu only).
+- If you don't know something, don't guess - don't provide it.
+- Ensure the message ends with a blank line then 'Sleek Bot'."""
 
         response = client.chat.completions.create(
             model="gpt-4o-mini",
@@ -199,14 +176,14 @@ Provide a clear, direct, polite, and concise answer to the user's message.
         )
         reply = response.choices[0].message.content.strip()
 
-        # Enforce suffix
+        # Enforce suffix with blank line
         if not reply.endswith("Sleek Bot"):
-            reply = reply + " Sleek Bot"
+            reply = reply + "\n\nSleek Bot"
         return reply
 
     except Exception as e:
         print(f"Text Processing Error: {e}")
-        return "Aap ke paigham ka jawab dene mein dushwari pesh aai hai. Baraye meherbani dobara koshish karein. Sleek Bot"
+        return "Aap ke paigham ka jawab dene mein dushwari pesh aai hai. Baraye meherbani dobara koshish karein.\n\nSleek Bot"
 
 def send_whatsapp_message(to_number, text):
     url = f"https://graph.facebook.com/v18.0/{PHONE_NUMBER_ID}/messages"
@@ -225,7 +202,6 @@ def send_document(to_number, document_path, caption=""):
         return
 
     url = f"https://graph.facebook.com/v18.0/{PHONE_NUMBER_ID}/messages"
-    # First upload the document
     with open(document_path, 'rb') as f:
         files = {'file': (os.path.basename(document_path), f, 'application/pdf')}
         data = {
@@ -241,7 +217,6 @@ def send_document(to_number, document_path, caption=""):
 
     if upload_resp.status_code == 200:
         media_id = upload_resp.json().get('id')
-        # Now send the document
         payload = {
             "messaging_product": "whatsapp",
             "to": to_number,
@@ -275,21 +250,25 @@ async def receive_message(request: Request):
 
             if msg_type == 'image':
                 media_id = message['image']['id']
-                send_whatsapp_message(sender_phone, "📄 Apka bill analyze ho raha hai... Baraye meherbani intizar karein. Sleek Bot")
+                send_whatsapp_message(sender_phone, "📄 Apka bill analyze ho raha hai... Baraye meherbani intizar karein.\n\nSleek Bot")
                 reply_text = analyze_bill_image(media_id)
                 send_whatsapp_message(sender_phone, reply_text)
 
             elif msg_type == 'text':
                 msg_text = message['text']['body']
 
+                # Check for loan/financing inquiry
+                if detect_loan_inquiry(msg_text):
+                    send_whatsapp_message(sender_phone, "Loaning can be done through JS Bank.\n\nSleek Bot")
+
                 # Check for distributor inquiry
-                if detect_distributor_inquiry(msg_text):
+                elif detect_distributor_inquiry(msg_text):
                     send_whatsapp_message(sender_phone,
-                        "Shukriya! Aap ki dilchaspi ke liye. Humari distributor policy aur details is PDF mein hain. Baraye meherbani check karein aur humein batayen ke aap ka business kya hai aur kis area mein kaam karte hain? 🤝 Sleek Bot")
+                        "Shukriya! Aap ki dilchaspi ke liye. Humari distributor policy aur details is PDF mein hain. Baraye meherbani check karein aur humein batayen ke aap ka business kya hai aur kis area mein kaam karte hain? 🤝\n\nSleek Bot")
                     if os.path.exists(DISTRIBUTOR_PDF):
                         send_document(sender_phone, DISTRIBUTOR_PDF, "Sleek Solar Distributor Information")
                     else:
-                        send_whatsapp_message(sender_phone, "PDF currently unavailable. Team se contact karein. Sleek Bot")
+                        send_whatsapp_message(sender_phone, "PDF currently unavailable. Team se contact karein.\n\nSleek Bot")
 
                 # Check for quotation/battery requests
                 else:
@@ -299,20 +278,20 @@ async def receive_message(request: Request):
                         pdf_file = QUOTATION_PDFS.get(kw_key)
                         if pdf_file and os.path.exists(pdf_file):
                             send_whatsapp_message(sender_phone,
-                                f"Yahan {size}kW hybrid system ki standard quotation share kar raha hoon. Exact quotation site visit ke baad provide ki jayegi. Sleek Bot")
+                                f"Yahan {size}kW hybrid system ki standard quotation share kar raha hoon. Exact quotation site visit ke baad provide ki jayegi.\n\nSleek Bot")
                             send_document(sender_phone, pdf_file, f"Sleek Solar {size}kW Hybrid System Quotation")
                         else:
                             send_whatsapp_message(sender_phone,
-                                f"{size}kW hybrid system ki quotation ke liye humari team se 0313-8666256 par contact karein. Sleek Bot")
+                                f"{size}kW hybrid system ki quotation ke liye humari team se 0313-8666256 par contact karein.\n\nSleek Bot")
 
-                    elif req_type == 'battery' and size in ['5', '6', '8', '10', '12', '15', '20']:
+                    elif req_type == 'battery' and size in BATTERY_SIZES:
                         if os.path.exists(BATTERY_PDF):
                             send_whatsapp_message(sender_phone,
-                                f"Yahan {size}kWh lithium battery ki price list share kar raha hoon. Sleek Bot")
+                                f"Yahan {size}kWh lithium battery ki price list share kar raha hoon.\n\nSleek Bot")
                             send_document(sender_phone, BATTERY_PDF, f"Sleek Solar {size}kWh Battery Price List")
                         else:
                             send_whatsapp_message(sender_phone,
-                                "Battery pricing ke liye humari team se 0313-8666256 par contact karein. Sleek Bot")
+                                "Battery pricing ke liye humari team se 0313-8666256 par contact karein.\n\nSleek Bot")
 
                     else:
                         # Default AI response
