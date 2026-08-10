@@ -2,10 +2,8 @@ from fastapi import FastAPI, Request, Response
 import requests
 import base64
 import os
-import json
-from datetime import datetime, time, timedelta
+import re
 from openai import OpenAI
-import asyncio
 
 app = FastAPI()
 
@@ -13,7 +11,6 @@ app = FastAPI()
 WHATSAPP_TOKEN = os.environ.get("WHATSAPP_TOKEN")
 PHONE_NUMBER_ID = os.environ.get("PHONE_NUMBER_ID")
 VERIFY_TOKEN = os.environ.get("VERIFY_TOKEN")
-AUTHOR_NUMBER = os.environ.get("AUTHOR_NUMBER")  # Your WhatsApp number to receive daily report
 
 # Set up the OpenAI client (using gpt-4o-mini)
 client = OpenAI(
@@ -25,107 +22,16 @@ HEADERS = {
     "Content-Type": "application/json"
 }
 
-# Default Hybrid System Quotations (Rough Estimates)
-HYBRID_QUOTATIONS = {
-    "5kw": {
-        "system": "5kW Hybrid Solar System",
-        "components": [
-            "5kW Hybrid Inverter (Huawei/Maxpower/Solis/GoodWe)",
-            "8-10 x 580W+ Tier-1 Solar Panels (Canadian Solar/Jinko/Longi/Risen)",
-            "Mounting Structure & Wiring",
-            "Installation & Commissioning"
-        ],
-        "price_range": "PKR 650,000 - 750,000",
-        "note": "Exact quotation after site visit. Battery storage sold separately."
-    },
-    "6kw": {
-        "system": "6kW Hybrid Solar System",
-        "components": [
-            "6kW Hybrid Inverter (Huawei/Maxpower/Solis/GoodWe)",
-            "10-12 x 580W+ Tier-1 Solar Panels (Canadian Solar/Jinko/Longi/Risen)",
-            "Mounting Structure & Wiring",
-            "Installation & Commissioning"
-        ],
-        "price_range": "PKR 750,000 - 850,000",
-        "note": "Exact quotation after site visit. Battery storage sold separately."
-    },
-    "8kw": {
-        "system": "8kW Hybrid Solar System",
-        "components": [
-            "8kW Hybrid Inverter (Huawei/Maxpower/Solis/GoodWe)",
-            "14-16 x 580W+ Tier-1 Solar Panels (Canadian Solar/Jinko/Longi/Risen)",
-            "Mounting Structure & Wiring",
-            "Installation & Commissioning"
-        ],
-        "price_range": "PKR 950,000 - 1,100,000",
-        "note": "Exact quotation after site visit. Battery storage sold separately."
-    },
-    "10kw": {
-        "system": "10kW Hybrid Solar System",
-        "components": [
-            "10kW Hybrid Inverter (Huawei/Maxpower/Solis/GoodWe)",
-            "18-20 x 580W+ Tier-1 Solar Panels (Canadian Solar/Jinko/Longi/Risen)",
-            "Mounting Structure & Wiring",
-            "Installation & Commissioning"
-        ],
-        "price_range": "PKR 1,200,000 - 1,400,000",
-        "note": "Exact quotation after site visit. Battery storage sold separately."
-    }
+# PDF file mapping for quotations
+QUOTATION_PDFS = {
+    "5kw": "5kW Hybrid Quotation.pdf",
+    "6kw": "6kW Hybrid Quotation.pdf",
+    "8kw": "8kW Hybrid Quotation.pdf",
+    "10kw": "10kW Hybrid Quotation.pdf",
 }
 
-# Battery Price Reference (from batteries_price.pdf)
-BATTERY_INFO = {
-    "5kwh": "Sleek Solar 5kWh Lithium Battery: ~PKR 180,000 - 200,000",
-    "6kwh": "Sleek Solar 6kWh Lithium Battery: ~PKR 210,000 - 230,000",
-    "8kwh": "Sleek Solar 8kWh Lithium Battery: ~PKR 270,000 - 300,000",
-    "10kwh": "Sleek Solar 10kWh Lithium Battery: ~PKR 330,000 - 360,000",
-    "12kwh": "Sleek Solar 12kWh Lithium Battery: ~PKR 390,000 - 420,000",
-    "15kwh": "Sleek Solar 15kWh Lithium Battery: ~PKR 480,000 - 520,000",
-    "20kwh": "Sleek Solar 20kWh Lithium Battery: ~PKR 620,000 - 680,000",
-}
-
-# Track numbers messaged during bot hours (6 PM - 9 AM)
-bot_hour_contacts = set()
-contacts_file = "bot_hour_contacts.json"
-
-def load_contacts():
-    global bot_hour_contacts
-    try:
-        with open(contacts_file, 'r') as f:
-            data = json.load(f)
-            bot_hour_contacts = set(data.get('contacts', []))
-    except:
-        bot_hour_contacts = set()
-
-def save_contacts():
-    with open(contacts_file, 'w') as f:
-        json.dump({'contacts': list(bot_hour_contacts)}, f)
-
-def is_bot_active_hours():
-    """Check if current time is between 6 PM and 9 AM"""
-    now = datetime.now().time()
-    return now >= time(18, 0) or now <= time(9, 0)
-
-def format_quotation(kw_key):
-    """Format a quotation response for a specific kW system"""
-    if kw_key not in HYBRID_QUOTATIONS:
-        return None
-    q = HYBRID_QUOTATIONS[kw_key]
-    lines = [f"📋 *{q['system']} (Rough Estimate)*"]
-    lines.append(f"💰 *Price Range:* {q['price_range']}")
-    lines.append("📦 *Includes:*")
-    for comp in q['components']:
-        lines.append(f"  • {comp}")
-    lines.append(f"\n📝 *Note:* {q['note']}")
-    lines.append("\n🏠 For exact quotation, we'll schedule a site visit.")
-    return "\n".join(lines)
-
-def format_battery_price(kwh_key):
-    """Format battery price response"""
-    key = kwh_key.lower().replace(" ", "")
-    if key in BATTERY_INFO:
-        return f"🔋 *Battery Price:*\n{BATTERY_INFO[key]}\n\n📝 Prices are indicative. Exact cost confirmed after site visit."
-    return None
+BATTERY_PDF = "batteries_price.pdf"
+DISTRIBUTOR_PDF = "distributors.pdf"
 
 def detect_quotation_request(text):
     """Detect if user is asking for a system quotation vs battery price"""
@@ -136,7 +42,6 @@ def detect_quotation_request(text):
     battery_keywords = ['battery', 'batteries', 'storage', 'kwh', 'kwhr', 'backup', 'lithium', 'sodium']
 
     # Extract kW/kWh mentions
-    import re
     kw_matches = re.findall(r'(\d+)\s*kw\b', text_lower)
     kwh_matches = re.findall(r'(\d+)\s*kwh\b', text_lower)
 
@@ -161,6 +66,11 @@ def detect_quotation_request(text):
 
     return None, None
 
+def detect_distributor_inquiry(text):
+    """Detect if user is asking about distributorship"""
+    distributor_keywords = ['distributor', 'dealership', 'dealer', 'partnership', 'wholesale', 'distributer', 'distributorship']
+    return any(kw in text.lower() for kw in distributor_keywords)
+
 # Master Business Knowledge & Behavior Rules Prompt
 SYSTEM_PROMPT = """
 You are an expert, courteous, and highly professional AI customer assistant for Sleek Solar International (Pvt) Ltd.
@@ -173,7 +83,7 @@ CORE OUTPUT RULES:
    - If the user writes in Roman Urdu, respond in elegant, grammatically correct Roman Urdu (use "Aap", "Kiya", "Humari", "Guzarish", etc.).
    - If in English, respond in clear professional English.
 5. FORMATTING: Use structured bullet points and clean spacing when providing lists of products.
-6. KEEP REPLIES ENGAGING, SHORT AND SPECIFIC.
+6. KEEP REPLIES CONCISE, SPECIFIC TO CLIENT'S NEED.
 
 BUSINESS DATA:
 - Company Name: Sleek Solar International (Pvt) Ltd
@@ -183,7 +93,7 @@ BUSINESS DATA:
 PRODUCTS CATALOGUE:
 - Solar Panels: Canadian Solar, Jinko, Longi, Risen (580W-740W Bifacial technology with 30 Years Warranty).
 - Inverters: Huawei, Maxpower, SAJ, Solis, GoodWe, Inverex (Sizes: 5kW, 6kW, 8kW, 10kW, 15kW, 20kW up to 110kW Hybrid inverters with 5 Years Warranty).
-- Batteries: Proprietary Sleek Solar Lithium-Ion batteries (5kWh to 20kWh), Sodium-Ion options.
+- Batteries: Sleek Solar Lithium-Ion batteries (5kWh to 20kWh), Sodium-Ion currently not available.
 
 SIZING & CALCULATION ENGINE:
 - Calculation by Bill Units: Recommended kW = (Monthly Units / 120).
@@ -195,11 +105,17 @@ SIZING & CALCULATION ENGINE:
   * Calculate running load, add a 50% safety/surge margin to handle motor startup power so system won't trip.
   * Example: 2 ACs (3600W) + 4 Fans (300W) + 1 Motor (1500W) = 5400W base load -> Recommend an 8 kW to 10 kW system.
 
-QUOTATION HANDLING (Handled by system, not AI):
-- Default hybrid quotations available for 5kW, 6kW, 8kW, 10kW systems
-- Battery prices available for 5kWh to 20kWh
+PRICING RULES (STRICT):
+- NEVER state, estimate, or suggest any price/cost/rupee figure for any product or system in text replies.
+- For system quotations (5kW, 6kW, 8kW, 10kW): The system sends the standard quotation PDF. You just mention that the standard quotation is being shared and exact quotation will be provided after site visit.
+- For battery prices: The system sends batteries_price.pdf. You just mention the battery price list is being shared.
+- For distributor inquiries: The system sends distributors.pdf. You politely ask about their business.
+
+QUOTATION HANDLING:
+- Standard quotations available for 5kW, 6kW, 8kW, 10kW systems (PDF sent automatically)
+- Battery price list available (batteries_price.pdf sent automatically)
+- Distributor information available (distributors.pdf sent automatically)
 - Exact quotations only after site visit
-- System handles 6kW system vs 6kWh battery differentiation automatically
 
 DISTRIBUTOR INQUIRIES:
 - If user asks about becoming a distributor, dealership, partnership, or wholesale
@@ -233,8 +149,9 @@ Examine this electricity bill image carefully.
 2. Calculate the required system size (Units / 120).
 3. Provide the accurate recommendation based on Sizing Rules.
 4. Reply in clear, professional Roman Urdu or English depending on context.
-5. Keep response engaging, short and specific.
+5. Keep response concise and specific to client's need.
 6. Suggest appropriate system size from 5kW, 6kW, 8kW, 10kW options.
+7. Do NOT mention any prices.
 Ensure the message ends with ' Sleek Bot'."""
 
         response = client.chat.completions.create(
@@ -268,12 +185,12 @@ def get_text_response(msg_text):
 USER MESSAGE: "{msg_text}"
 
 TASK:
-Provide a clear, direct, polite, and well-formatted answer to the user's message.
+Provide a clear, direct, polite, and concise answer to the user's message.
 - Calculate load/kW if appliances or units are mentioned.
 - Suggest appropriate system (5kW, 6kW, 8kW, 10kW) based on calculation.
-- Do NOT provide exact prices - system handles quotations separately.
+- Do NOT provide any prices - PDFs are sent separately for quotations/batteries.
 - Do NOT repeat unnecessary policies if not asked.
-- Keep replies engaging, short and specific.
+- Keep replies concise and specific to client's need.
 - Ensure the message strictly ends with ' Sleek Bot'."""
 
         response = client.chat.completions.create(
@@ -303,6 +220,10 @@ def send_whatsapp_message(to_number, text):
 
 def send_document(to_number, document_path, caption=""):
     """Send a PDF/document via WhatsApp"""
+    if not os.path.exists(document_path):
+        print(f"PDF not found: {document_path}")
+        return
+
     url = f"https://graph.facebook.com/v18.0/{PHONE_NUMBER_ID}/messages"
     # First upload the document
     with open(document_path, 'rb') as f:
@@ -333,27 +254,6 @@ def send_document(to_number, document_path, caption=""):
         }
         requests.post(url, headers=HEADERS, json=payload)
 
-async def send_daily_report():
-    """Send daily report of contacts to author at 9 AM"""
-    while True:
-        now = datetime.now()
-        # Calculate next 9 AM
-        next_9am = now.replace(hour=9, minute=0, second=0, microsecond=0)
-        if now >= next_9am:
-            next_9am += timedelta(days=1)
-
-        wait_seconds = (next_9am - now).total_seconds()
-        await asyncio.sleep(wait_seconds)
-
-        # Send report
-        if bot_hour_contacts and AUTHOR_NUMBER:
-            contacts_list = "\n".join([f"• {num}" for num in sorted(bot_hour_contacts)])
-            report = f"📊 *Daily Bot Report (6 PM - 9 AM)*\n\nTotal contacts: {len(bot_hour_contacts)}\n\n{contacts_list}\n\n—Sleek Bot"
-            send_whatsapp_message(AUTHOR_NUMBER, report)
-            # Clear for next day
-            bot_hour_contacts.clear()
-            save_contacts()
-
 @app.get("/webhook")
 async def verify_webhook(request: Request):
     mode = request.query_params.get("hub.mode")
@@ -373,11 +273,6 @@ async def receive_message(request: Request):
             sender_phone = message['from']
             msg_type = message['type']
 
-            # Track contacts during bot hours
-            if is_bot_active_hours():
-                bot_hour_contacts.add(sender_phone)
-                save_contacts()
-
             if msg_type == 'image':
                 media_id = message['image']['id']
                 send_whatsapp_message(sender_phone, "📄 Apka bill analyze ho raha hai... Baraye meherbani intizar karein. Sleek Bot")
@@ -388,12 +283,11 @@ async def receive_message(request: Request):
                 msg_text = message['text']['body']
 
                 # Check for distributor inquiry
-                distributor_keywords = ['distributor', 'dealership', 'dealer', 'partnership', 'wholesale', 'distributer', 'distributorship']
-                if any(kw in msg_text.lower() for kw in distributor_keywords):
+                if detect_distributor_inquiry(msg_text):
                     send_whatsapp_message(sender_phone,
                         "Shukriya! Aap ki dilchaspi ke liye. Humari distributor policy aur details is PDF mein hain. Baraye meherbani check karein aur humein batayen ke aap ka business kya hai aur kis area mein kaam karte hain? 🤝 Sleek Bot")
-                    if os.path.exists("distributors.pdf"):
-                        send_document(sender_phone, "distributors.pdf", "Sleek Solar Distributor Information")
+                    if os.path.exists(DISTRIBUTOR_PDF):
+                        send_document(sender_phone, DISTRIBUTOR_PDF, "Sleek Solar Distributor Information")
                     else:
                         send_whatsapp_message(sender_phone, "PDF currently unavailable. Team se contact karein. Sleek Bot")
 
@@ -402,14 +296,24 @@ async def receive_message(request: Request):
                     req_type, size = detect_quotation_request(msg_text)
                     if req_type == 'system' and size in ['5', '6', '8', '10']:
                         kw_key = f"{size}kw"
-                        quotation = format_quotation(kw_key)
-                        if quotation:
-                            send_whatsapp_message(sender_phone, quotation + " Sleek Bot")
+                        pdf_file = QUOTATION_PDFS.get(kw_key)
+                        if pdf_file and os.path.exists(pdf_file):
+                            send_whatsapp_message(sender_phone,
+                                f"Yahan {size}kW hybrid system ki standard quotation share kar raha hoon. Exact quotation site visit ke baad provide ki jayegi. Sleek Bot")
+                            send_document(sender_phone, pdf_file, f"Sleek Solar {size}kW Hybrid System Quotation")
+                        else:
+                            send_whatsapp_message(sender_phone,
+                                f"{size}kW hybrid system ki quotation ke liye humari team se 0313-8666256 par contact karein. Sleek Bot")
+
                     elif req_type == 'battery' and size in ['5', '6', '8', '10', '12', '15', '20']:
-                        kwh_key = f"{size}kwh"
-                        battery_price = format_battery_price(kwh_key)
-                        if battery_price:
-                            send_whatsapp_message(sender_phone, battery_price + " Sleek Bot")
+                        if os.path.exists(BATTERY_PDF):
+                            send_whatsapp_message(sender_phone,
+                                f"Yahan {size}kWh lithium battery ki price list share kar raha hoon. Sleek Bot")
+                            send_document(sender_phone, BATTERY_PDF, f"Sleek Solar {size}kWh Battery Price List")
+                        else:
+                            send_whatsapp_message(sender_phone,
+                                "Battery pricing ke liye humari team se 0313-8666256 par contact karein. Sleek Bot")
+
                     else:
                         # Default AI response
                         reply_text = get_text_response(msg_text)
@@ -417,11 +321,3 @@ async def receive_message(request: Request):
     except Exception as e:
         print(f"Webhook Execution Error: {e}")
     return {"status": "ok"}
-
-# Load contacts on startup
-load_contacts()
-
-# Start daily report scheduler
-@app.on_event("startup")
-async def startup_event():
-    asyncio.create_task(send_daily_report())
