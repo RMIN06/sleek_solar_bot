@@ -99,7 +99,12 @@ CORE OUTPUT RULES:
    - Batteries: Sleek Solar Lithium-Ion (6kWh, 8kWh, 10kWh, 16kWh)
 7. PRICING: NEVER state any price/cost/rupee figure in text. PDFs handle pricing.
 8. LOAN: If asked about loan/financing/installment, say: "Loaning can be done through JS Bank."
-9. SYSTEM SIZING (HARD RULE): 1.5 Ton AC = 5kW system required. Calculate based on this formula.
+9. SYSTEM SIZING:
+   - When user asks for solar/system for their house, FIRST ask for their monthly average electricity units (kWh).
+   - Calculate recommended kW using: Monthly Average Units / 120 = Recommended System kW.
+   - Reference rule for validation: 1.5 Ton AC ≈ 5kW system. Use this to cross-check if user mentions ACs.
+   - Do NOT assume AC count or calculate solely on ACs unless user provides that info.
+   - Suggest appropriate system from 5kW, 6kW, 8kW, 10kW options based on calculation.
 10. UNKNOWN INFO: If you don't know something, do not guess. Do not provide the information.
 11. EXACT QUOTATION: Only after site visit.
 """
@@ -122,13 +127,14 @@ def analyze_bill_image(media_id):
 
 TASK:
 Examine this electricity bill image carefully.
-1. Extract the monthly consumed units.
-2. Calculate the required system size using: 1.5 Ton AC = 5kW system (hard rule).
-3. Recommend appropriate system size from 5kW, 6kW, 8kW, 10kW options.
-4. Reply in user's language (English or Roman Urdu only).
-5. Be extremely concise and specific.
-6. Do NOT mention any prices.
-7. Ensure the message ends with a blank line then 'Sleek Bot'."""
+1. Extract the monthly consumed units from the bill.
+2. Calculate the required system size using: Monthly Average Units / 120 = Recommended System kW.
+3. Reference rule for validation: 1.5 Ton AC ≈ 5kW system.
+4. Recommend appropriate system size from 5kW, 6kW, 8kW, 10kW options based on calculation.
+5. Reply in user's language (English or Roman Urdu only).
+6. Be extremely concise and specific.
+7. Do NOT mention any prices.
+8. Ensure the message ends with a blank line then 'Sleek Bot'."""
 
         response = client.chat.completions.create(
             model="gpt-4o-mini",
@@ -162,7 +168,8 @@ USER MESSAGE: "{msg_text}"
 
 TASK:
 Provide a clear, direct, polite, and extremely concise answer.
-- Calculate load/kW if appliances or units mentioned using: 1.5 Ton AC = 5kW system.
+- If user asks for solar/system for house: ask for monthly average units (kWh) first, then calculate using Monthly Units / 120 = Recommended kW.
+- If user provides units or appliances: calculate using Monthly Units / 120, cross-check with AC rule (1.5 Ton AC ≈ 5kW).
 - Suggest appropriate system (5kW, 6kW, 8kW, 10kW) based on calculation.
 - Do NOT provide any prices.
 - Do NOT mention brands/products user didn't ask about.
