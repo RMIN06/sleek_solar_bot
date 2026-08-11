@@ -142,11 +142,13 @@ def is_within_allowed_hours():
 
 def should_store_and_defer_response():
     """Check if we should store the message and defer response (outside allowed hours)"""
+
+    global summary_sent_today
+
     if not is_within_allowed_hours():
         # Reset daily summary flag if it's a new day (after 9am)
         now = datetime.now()
         if now.hour >= ALLOWED_END_HOUR and summary_sent_today:
-            global summary_sent_today
             summary_sent_today = False
         return True
     return False
