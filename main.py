@@ -4,6 +4,8 @@ import base64
 import os
 import re
 from openai import OpenAI
+from datetime import datetime, time
+import json
 
 app = FastAPI()
 
@@ -21,6 +23,20 @@ HEADERS = {
     "Authorization": f"Bearer {WHATSAPP_TOKEN}",
     "Content-Type": "application/json"
 }
+
+# Time restrictions: only respond between 6pm (18:00) and 9am (09:00)
+ALLOWED_START_HOUR = 18  # 6pm
+ALLOWED_END_HOUR = 9     # 9am (next day)
+
+# Storage for tracking (in production, use a database)
+# Format: {"phone_number": {"name": str, "location": str, "timestamp": str}}
+site_visit_requests = {}
+# Track site visit conversation state: {"phone_number": "step" where step is "awaiting_name", "awaiting_location", or "completed"}
+site_visit_state = {}
+# Numbers that messaged outside allowed hours (to be summarized at 9am)
+overnight_messages = set()
+# Flag to track if we've already sent the 9am summary for today
+summary_sent_today = False
 
 # PDF file mapping for quotations
 QUOTATION_PDFS = {
@@ -91,7 +107,7 @@ CORE OUTPUT RULES:
    - If the user writes in English, respond in clear professional English ONLY.
    - If the user writes in Roman Urdu (Urdu written in English letters), respond in elegant, grammatically correct Roman Urdu ONLY (use "Aap", "Kiya", "Humari", "Guzarish", etc.).
    - NEVER use native Urdu script, Arabic script, or any other language.
-   - Match the user's language exactly.
+   - Match the user's language exactly even if they mix English and Roman Urdu. Do NOT switch languages. Only switch languagewhen user switches.
 5. RESPONSE STYLE: Be extremely concise, specific to client's need only. Do not add extra information the user didn't ask for. Do not cite products/brands not mentioned by user.
 6. BRANDS/PRODUCTS: Only mention these approved brands when relevant:
    - Solar Panels: Canadian Solar, Jinko, Longi, Risen (580W-740W Bifacial, 30 Years Warranty)
@@ -102,12 +118,80 @@ CORE OUTPUT RULES:
 9. SYSTEM SIZING:
    - When user asks for solar/system for their house, FIRST ask for their monthly average electricity units (kWh).
    - Calculate recommended kW using: Monthly Average Units / 120 = Recommended System kW.
+   - When user provides appliances information, calculate using 1 ac = 5kW system rule. Also keep other appliances in count while calculating the total system size required.
    - Reference rule for validation: 1.5 Ton AC ≈ 5kW system. Use this to cross-check if user mentions ACs.
    - Do NOT assume AC count or calculate solely on ACs unless user provides that info.
    - Suggest appropriate system from 5kW, 6kW, 8kW, 10kW options based on calculation.
+   - Write response with proper spacing, do not dump everything in one paragraph. Use line breaks for clarity.
+
 10. UNKNOWN INFO: If you don't know something, do not guess. Do not provide the information.
 11. EXACT QUOTATION: Only after site visit.
 """
+
+def is_within_allowed_hours():
+    """Check if current time is within allowed response hours (6pm-9am)"""
+    now = datetime.now().time()
+    start_time = time(ALLOWED_START_HOUR, 0)  # 6:00 PM
+    end_time = time(ALLOWED_END_HOUR, 0)      # 9:00 AM
+
+    # Handle overnight period (6pm to 9am next day)
+    if ALLOWED_START_HOUR > ALLOWED_END_HOUR:
+        return now >= start_time or now <= end_time
+    else:
+        return start_time <= now <= end_time
+
+def should_store_and_defer_response():
+    """Check if we should store the message and defer response (outside allowed hours)"""
+    if not is_within_allowed_hours():
+        # Reset daily summary flag if it's a new day (after 9am)
+        now = datetime.now()
+        if now.hour >= ALLOWED_END_HOUR and summary_sent_today:
+            global summary_sent_today
+            summary_sent_today = False
+        return True
+    return False
+
+def store_overnight_message(sender_phone):
+    """Store a sender's number for the overnight summary"""
+    overnight_messages.add(sender_phone)
+
+def send_overnight_summary(author_number):
+    """Send a summary of overnight messages to the author"""
+    global summary_sent_today
+    if not overnight_messages or summary_sent_today:
+        return
+
+    if len(overnight_messages) == 0:
+        return
+
+    message = f"Overnight message summary ({len(overnight_messages)} messages):\n"
+    for i, num in enumerate(overnight_messages, 1):
+        message += f"{i}. {num}\n"
+
+    send_whatsapp_message(author_number, message)
+    summary_sent_today = True
+    # Clear the set after sending summary
+    overnight_messages.clear()
+
+def detect_site_visit_request(text):
+    """Detect if user is asking about or wants to book a site visit"""
+    site_visit_keywords = ['site visit', 'site survey', 'visit', 'survey', 'come to', 'come over',
+                          'site inspection', 'property visit', 'home visit']
+    text_lower = text.lower()
+    return any(keyword in text_lower for keyword in site_visit_keywords)
+
+def detect_job_hiring_inquiry(text):
+    """Detect if user is asking about job/hiring/career opportunities"""
+    job_keywords = ['job', 'hire', 'hiring', 'career', 'vacancy', 'position', 'employment',
+                   'work', 'recruitment', 'recruit', 'staff', 'employee', 'opportunity']
+    text_lower = text.lower()
+    return any(keyword in text_lower for keyword in job_keywords)
+
+def extract_name_and_location(text):
+    """Extract name and Google Maps location from text (simplified)"""
+    # This is a simplified extraction - in reality, you'd want more sophisticated NLP
+    # For now, we'll ask the user to provide these separately
+    return None, None
 
 def analyze_bill_image(media_id):
     """Downloads image and asks OpenAI to read the electricity bill"""
@@ -263,6 +347,17 @@ async def receive_message(request: Request):
 
             elif msg_type == 'text':
                 msg_text = message['text']['body']
+
+                # Check for job/hiring inquiry - handle anytime
+                if detect_job_hiring_inquiry(msg_text):
+                    send_whatsapp_message(sender_phone, "Please mail your CV at hr@sleeksolar.com. Our team will look into it.\n\nSleek Bot")
+                    return {"status": "ok"}
+
+                # Check if we're within allowed hours for responses (6pm-9am)
+                if not is_within_allowed_hours():
+                    # Outside allowed hours - store for overnight summary but don't respond
+                    store_overnight_message(sender_phone)
+                    return {"status": "ok"}
 
                 # Check for loan/financing inquiry
                 if detect_loan_inquiry(msg_text):
