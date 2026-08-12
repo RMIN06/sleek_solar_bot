@@ -131,9 +131,15 @@ CORE OUTPUT RULES:
    - Write response with proper spacing, do not dump everything in one paragraph. Use line breaks for clarity.
 
 10. HIDE CALCULATIONS: NEVER show formulas, calculations, division, multiplication, or any intermediate math steps. ONLY show the final recommended system size (e.g., "Based on your usage, I recommend a 6kW system.").
-11. CONVERSATION CONTEXT: Use the conversation history to maintain context. Remember what the user told you previously (units, appliances, location, etc.) and reference it naturally.
-12. UNKNOWN INFO: If you don't know something, do not guess. Do not provide the information.
-13. EXACT QUOTATION: Only after site visit.
+11. CONVERSATION CONTEXT - CRITICAL:
+    - You HAVE ACCESS to the full conversation history. USE IT.
+    - If user already provided monthly units in a previous message, DO NOT ask again. Use that info to recommend system size.
+    - If user already provided appliances list, DO NOT ask for monthly units. Use appliances to calculate and recommend.
+    - If user already received a system size recommendation, DO NOT re-calculate or re-ask. Reference the previous recommendation.
+    - If user asks for site visit/survey booking, use the already-provided info (units/appliances/recommended size) - do not re-ask.
+12. QUOTATION REQUESTS: If user asks for price/quotation/cost of a specific kW system (e.g., "5kW price", "6kW system cost"), and that size is available (5kW, 6kW, 8kW, 10kW), IMMEDIATELY provide the quotation. Do not ask for units or appliances again.
+13. UNKNOWN INFO: If you don't know something, do not guess. Do not provide the information.
+14. EXACT QUOTATION: Only after site visit.
 """
 
 def is_within_allowed_hours():
@@ -202,6 +208,64 @@ def extract_name_and_location(_text):
     # This is a simplified extraction - in reality, you'd want more sophisticated NLP
     # For now, we'll ask the user to provide these separately
     return None, None
+
+
+def handle_site_visit_request(sender_phone, msg_text):
+    """Handle site visit/survey request using conversation context"""
+    # Get conversation history to check what info user already provided
+    history = conversation_history.get(sender_phone, [])
+
+    # Build context from history
+    context_parts = []
+    for msg in history:
+        content = msg["content"].lower()
+        if "unit" in content or "kwh" in content:
+            # Extract units info
+            units_match = re.search(r'(\d+)\s*(?:units?|kwh)', content)
+            if units_match:
+                context_parts.append(f"Monthly units: {units_match.group(1)}")
+        if any(appliance in content for appliance in ['ac', 'air condition', 'fridge', 'refrigerator', 'fan', 'light', 'tv', 'washing']):
+            context_parts.append("Appliances mentioned")
+        if 'kw' in content and any(s in content for s in ['5kw', '6kw', '8kw', '10kw', '5 kw', '6 kw', '8 kw', '10 kw']):
+            kw_match = re.search(r'(\d+)\s*kw', content)
+            if kw_match:
+                context_parts.append(f"Recommended: {kw_match.group(1)}kW system")
+
+    context_str = "; ".join(context_parts) if context_parts else "No previous sizing info"
+
+    # Check if we're in site visit conversation flow
+    current_state = site_visit_state.get(sender_phone, "none")
+
+    if current_state == "awaiting_name":
+        # User provided name, now ask for location
+        site_visit_requests[sender_phone]["name"] = msg_text.strip()
+        site_visit_state[sender_phone] = "awaiting_location"
+        send_whatsapp_message(sender_phone,
+            "Shukriya! Ab baraye meherbani apni location (Google Maps link ya address) share karein.\n\nSleek Bot")
+        return
+
+    elif current_state == "awaiting_location":
+        # User provided location, complete the request
+        site_visit_requests[sender_phone]["location"] = msg_text.strip()
+        site_visit_requests[sender_phone]["timestamp"] = datetime.now().isoformat()
+        site_visit_state[sender_phone] = "completed"
+
+        send_whatsapp_message(sender_phone,
+            f"Site visit request confirmed!\nName: {site_visit_requests[sender_phone]['name']}\nLocation: {site_visit_requests[sender_phone]['location']}\n\nHumari team aap se jald hi contact karegi. Shukriya!\n\nSleek Bot")
+        return
+
+    else:
+        # New site visit request - start the flow
+        site_visit_state[sender_phone] = "awaiting_name"
+        site_visit_requests[sender_phone] = {}
+
+        # Use context in the response
+        response = "Site visit ke liye shukriya! "
+        if context_parts:
+            response += f"Mere paas aap ki pehle ki information hai ({context_str}). "
+        response += "Baraye meherbani apna naam batayen.\n\nSleek Bot"
+
+        send_whatsapp_message(sender_phone, response)
 
 def analyze_bill_image(media_id, sender_phone):
     """Downloads image and asks OpenAI to read the electricity bill"""
@@ -285,22 +349,43 @@ def add_to_history(phone_number, role, content):
 def get_text_response(msg_text, sender_phone):
     """Handles text messages and Roman Urdu using AI with conversation memory"""
     try:
+        # Get conversation history for context
+        history = conversation_history.get(sender_phone, [])
+
+        # Build context summary for the AI
+        context_summary = ""
+        if history:
+            context_parts = []
+            for msg in history[-MAX_HISTORY_LENGTH:]:
+                content = msg["content"].lower()
+                if "unit" in content or "kwh" in content:
+                    units_match = re.search(r'(\d+)\s*(?:units?|kwh)', content)
+                    if units_match:
+                        context_parts.append(f"User mentioned monthly units: {units_match.group(1)} kWh")
+                if any(appliance in content for appliance in ['ac', 'air condition', 'fridge', 'refrigerator', 'fan', 'light', 'tv', 'washing machine', 'water pump']):
+                    context_parts.append("User provided appliances list")
+                if 'kw' in content and any(s in content for s in ['5kw', '6kw', '8kw', '10kw', '5 kw', '6 kw', '8 kw', '10 kw']):
+                    kw_match = re.search(r'(\d+)\s*kw', content)
+                    if kw_match:
+                        context_parts.append(f"Previous recommendation: {kw_match.group(1)}kW system")
+            if context_parts:
+                context_summary = "CONVERSATION CONTEXT: " + "; ".join(context_parts) + "\n"
+
         # Add user message to history
         add_to_history(sender_phone, "user", msg_text)
 
-        # Get conversation history for context
-        history = conversation_history.get(sender_phone, [])
+        # Get updated history for messages
         history_messages = []
         for msg in history[-MAX_HISTORY_LENGTH:]:
             history_messages.append({"role": msg["role"], "content": msg["content"]})
 
         prompt = f"""{SYSTEM_PROMPT}
 
-USER MESSAGE: "{msg_text}"
+{context_summary}USER MESSAGE: "{msg_text}"
 
 TASK:
 Provide a clear, direct, polite, and extremely concise answer.
-- If user asks for solar/system for house: ask for monthly average units (kWh) first (Method 1), OR calculate from appliances if they provide that info (Method 2).
+- If user asks for solar/system for house: check context first. If units/appliances already provided, use them to recommend. Only ask if NOT in context.
 - If user provides units: calculate internally using Monthly Units / 120, cross-check with AC rule (1.5 Ton AC ≈ 5kW).
 - If user provides appliances: calculate total load including all appliances.
 - Suggest appropriate system (5kW, 6kW, 8kW, 10kW) based on calculation.
@@ -449,6 +534,10 @@ async def receive_message(request: Request):
                         send_document(sender_phone, DISTRIBUTOR_PDF, "Sleek Solar Distributor Information")
                     else:
                         send_whatsapp_message(sender_phone, "PDF currently unavailable. Team se contact karein.\n\nSleek Bot")
+
+                # Check for site visit request - handle with context
+                elif detect_site_visit_request(msg_text):
+                    handle_site_visit_request(sender_phone, msg_text)
 
                 # Check for quotation/battery requests
                 else:
