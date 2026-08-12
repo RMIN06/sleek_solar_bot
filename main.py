@@ -5,7 +5,6 @@ import os
 import re
 from openai import OpenAI
 from datetime import datetime, time
-import json
 
 app = FastAPI()
 
@@ -37,6 +36,16 @@ site_visit_state = {}
 overnight_messages = set()
 # Flag to track if we've already sent the 9am summary for today
 summary_sent_today = False
+
+# Conversation memory: {"phone_number": [{"role": "user/assistant", "content": "message", "timestamp": "iso_format"}]}
+conversation_history = {}
+# Maximum number of messages to keep in history per user
+MAX_HISTORY_LENGTH = 10
+
+# Track processed message IDs to prevent duplicate processing
+processed_message_ids = set()
+# Maximum number of message IDs to keep (prevent memory leak)
+MAX_PROCESSED_IDS = 1000
 
 # PDF file mapping for quotations
 QUOTATION_PDFS = {
@@ -115,17 +124,16 @@ CORE OUTPUT RULES:
    - Batteries: Sleek Solar Lithium-Ion (6kWh, 8kWh, 10kWh, 16kWh)
 7. PRICING: NEVER state any price/cost/rupee figure in text. PDFs handle pricing.
 8. LOAN: If asked about loan/financing/installment, say: "Loaning can be done through JS Bank."
-9. SYSTEM SIZING:
-   - When user asks for solar/system for their house, FIRST ask for their monthly average electricity units (kWh).
-   - Calculate recommended kW using: Monthly Average Units / 120 = Recommended System kW.
-   - When user provides appliances information, calculate using 1 ac = 5kW system rule. Also keep other appliances in count while calculating the total system size required.
-   - Reference rule for validation: 1.5 Ton AC ≈ 5kW system. Use this to cross-check if user mentions ACs.
-   - Do NOT assume AC count or calculate solely on ACs unless user provides that info.
+9. SYSTEM SIZING - TWO METHODS:
+   METHOD 1 - Monthly Units: When user asks for solar/system for their house, FIRST ask for their monthly average electricity units (kWh). Calculate recommended kW using: Monthly Average Units / 120 = Recommended System kW.
+   METHOD 2 - Appliances: When user provides appliances information, calculate total load. Reference rule: 1.5 Ton AC ≈ 5kW system. Count all appliances (ACs, fridge, fans, lights, etc.) to determine total system size.
    - Suggest appropriate system from 5kW, 6kW, 8kW, 10kW options based on calculation.
    - Write response with proper spacing, do not dump everything in one paragraph. Use line breaks for clarity.
 
-10. UNKNOWN INFO: If you don't know something, do not guess. Do not provide the information.
-11. EXACT QUOTATION: Only after site visit.
+10. HIDE CALCULATIONS: NEVER show formulas, calculations, division, multiplication, or any intermediate math steps. ONLY show the final recommended system size (e.g., "Based on your usage, I recommend a 6kW system.").
+11. CONVERSATION CONTEXT: Use the conversation history to maintain context. Remember what the user told you previously (units, appliances, location, etc.) and reference it naturally.
+12. UNKNOWN INFO: If you don't know something, do not guess. Do not provide the information.
+13. EXACT QUOTATION: Only after site visit.
 """
 
 def is_within_allowed_hours():
@@ -189,13 +197,13 @@ def detect_job_hiring_inquiry(text):
     text_lower = text.lower()
     return any(keyword in text_lower for keyword in job_keywords)
 
-def extract_name_and_location(text):
+def extract_name_and_location(_text):
     """Extract name and Google Maps location from text (simplified)"""
     # This is a simplified extraction - in reality, you'd want more sophisticated NLP
     # For now, we'll ask the user to provide these separately
     return None, None
 
-def analyze_bill_image(media_id):
+def analyze_bill_image(media_id, sender_phone):
     """Downloads image and asks OpenAI to read the electricity bill"""
     try:
         # 1. Fetch Media URL from Meta
@@ -209,69 +217,116 @@ def analyze_bill_image(media_id):
         image_req = requests.get(media_url, headers={"Authorization": f"Bearer {WHATSAPP_TOKEN}"})
         base64_image = base64.b64encode(image_req.content).decode('utf-8')
 
+        # Get conversation history for context
+        history = conversation_history.get(sender_phone, [])
+        history_messages = []
+        for msg in history[-MAX_HISTORY_LENGTH:]:
+            history_messages.append({"role": msg["role"], "content": msg["content"]})
+
         prompt = f"""{SYSTEM_PROMPT}
 
 TASK:
 Examine this electricity bill image carefully.
 1. Extract the monthly consumed units from the bill.
-2. Calculate the required system size using: Monthly Average Units / 120 = Recommended System kW.
+2. Calculate the required system size internally (Monthly Average Units / 120).
 3. Reference rule for validation: 1.5 Ton AC ≈ 5kW system.
 4. Recommend appropriate system size from 5kW, 6kW, 8kW, 10kW options based on calculation.
 5. Reply in user's language (English or Roman Urdu only).
 6. Be extremely concise and specific.
 7. Do NOT mention any prices.
-8. Ensure the message ends with a blank line then 'Sleek Bot'."""
+8. NEVER show formulas, calculations, or intermediate math steps - ONLY the final recommendation.
+9. Ensure the message ends with a blank line then 'Sleek Bot'."""
+
+        messages = history_messages + [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": prompt},
+                    {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{base64_image}"}}
+                ]
+            }
+        ]
 
         response = client.chat.completions.create(
             model="gpt-4o-mini",
-            messages=[
-                {
-                    "role": "user",
-                    "content": [
-                        {"type": "text", "text": prompt},
-                        {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{base64_image}"}}
-                    ]
-                }
-            ]
+            messages=messages
         )
         reply = response.choices[0].message.content.strip()
 
         # Enforce suffix with blank line
         if not reply.endswith("Sleek Bot"):
             reply = reply + "\n\nSleek Bot"
+
+        # Store in conversation history
+        add_to_history(sender_phone, "assistant", reply)
+
         return reply
 
     except Exception as e:
         print(f"Vision Processing Error: {e}")
         return "Apka bill process nahi ho saka. Baraye meherbani saaf tasweer dobara bhejein.\n\nSleek Bot"
 
-def get_text_response(msg_text):
-    """Handles text messages and Roman Urdu using AI"""
+def add_to_history(phone_number, role, content):
+    """Add a message to the conversation history for a phone number"""
+    if phone_number not in conversation_history:
+        conversation_history[phone_number] = []
+
+    conversation_history[phone_number].append({
+        "role": role,
+        "content": content,
+        "timestamp": datetime.now().isoformat()
+    })
+
+    # Trim history if it exceeds max length
+    if len(conversation_history[phone_number]) > MAX_HISTORY_LENGTH:
+        conversation_history[phone_number] = conversation_history[phone_number][-MAX_HISTORY_LENGTH:]
+
+
+def get_text_response(msg_text, sender_phone):
+    """Handles text messages and Roman Urdu using AI with conversation memory"""
     try:
+        # Add user message to history
+        add_to_history(sender_phone, "user", msg_text)
+
+        # Get conversation history for context
+        history = conversation_history.get(sender_phone, [])
+        history_messages = []
+        for msg in history[-MAX_HISTORY_LENGTH:]:
+            history_messages.append({"role": msg["role"], "content": msg["content"]})
+
         prompt = f"""{SYSTEM_PROMPT}
 
 USER MESSAGE: "{msg_text}"
 
 TASK:
 Provide a clear, direct, polite, and extremely concise answer.
-- If user asks for solar/system for house: ask for monthly average units (kWh) first, then calculate using Monthly Units / 120 = Recommended kW.
-- If user provides units or appliances: calculate using Monthly Units / 120, cross-check with AC rule (1.5 Ton AC ≈ 5kW).
+- If user asks for solar/system for house: ask for monthly average units (kWh) first (Method 1), OR calculate from appliances if they provide that info (Method 2).
+- If user provides units: calculate internally using Monthly Units / 120, cross-check with AC rule (1.5 Ton AC ≈ 5kW).
+- If user provides appliances: calculate total load including all appliances.
 - Suggest appropriate system (5kW, 6kW, 8kW, 10kW) based on calculation.
 - Do NOT provide any prices.
 - Do NOT mention brands/products user didn't ask about.
 - Match user's language (English or Roman Urdu only).
+- Use conversation history to maintain context (remember previous units, appliances, etc.)
+- NEVER show formulas, calculations, or intermediate math steps - ONLY the final recommendation.
 - If you don't know something, don't guess - don't provide it.
 - Ensure the message ends with a blank line then 'Sleek Bot'."""
 
+        messages = history_messages + [{"role": "user", "content": prompt}]
+
         response = client.chat.completions.create(
             model="gpt-4o-mini",
-            messages=[{"role": "user", "content": prompt}]
+            messages=messages
         )
         reply = response.choices[0].message.content.strip()
 
         # Enforce suffix with blank line
         if not reply.endswith("Sleek Bot"):
             reply = reply + "\n\nSleek Bot"
+
+        # Store assistant response in history
+        add_to_history(sender_phone, "assistant", reply)
+
         return reply
 
     except Exception as e:
@@ -331,6 +386,21 @@ async def verify_webhook(request: Request):
         return Response(content=challenge, media_type="text/plain")
     return {"error": "Invalid token"}
 
+def is_duplicate_message(message_id):
+    """Check if message has already been processed"""
+    if message_id in processed_message_ids:
+        return True
+    # Add to processed set
+    processed_message_ids.add(message_id)
+    # Trim if exceeds max size
+    if len(processed_message_ids) > MAX_PROCESSED_IDS:
+        # Remove oldest entries (convert to list, slice, convert back)
+        processed_list = list(processed_message_ids)
+        processed_message_ids.clear()
+        processed_message_ids.update(processed_list[-MAX_PROCESSED_IDS:])
+    return False
+
+
 @app.post("/webhook")
 async def receive_message(request: Request):
     body = await request.json()
@@ -340,11 +410,17 @@ async def receive_message(request: Request):
             message = entry['messages'][0]
             sender_phone = message['from']
             msg_type = message['type']
+            message_id = message.get('id', '')
+
+            # Check for duplicate message
+            if message_id and is_duplicate_message(message_id):
+                print(f"Duplicate message ignored: {message_id}")
+                return {"status": "ok"}
 
             if msg_type == 'image':
                 media_id = message['image']['id']
                 send_whatsapp_message(sender_phone, "📄 Apka bill analyze ho raha hai... Baraye meherbani intizar karein.\n\nSleek Bot")
-                reply_text = analyze_bill_image(media_id)
+                reply_text = analyze_bill_image(media_id, sender_phone)
                 send_whatsapp_message(sender_phone, reply_text)
 
             elif msg_type == 'text':
@@ -398,8 +474,8 @@ async def receive_message(request: Request):
                                 "Battery pricing ke liye humari team se 0313-8666256 par contact karein.\n\nSleek Bot")
 
                     else:
-                        # Default AI response
-                        reply_text = get_text_response(msg_text)
+                        # Default AI response with conversation memory
+                        reply_text = get_text_response(msg_text, sender_phone)
                         send_whatsapp_message(sender_phone, reply_text)
     except Exception as e:
         print(f"Webhook Execution Error: {e}")
