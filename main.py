@@ -126,8 +126,9 @@ CORE OUTPUT RULES:
 8. LOAN: If asked about loan/financing/installment, say: "Loaning can be done through JS Bank."
 9. SYSTEM SIZING - TWO METHODS:
    METHOD 1 - Monthly Units: When user asks for solar/system for their house, FIRST ask for their monthly average electricity units (kWh). Calculate recommended kW using: Monthly Average Units / 120 = Recommended System kW.
-   METHOD 2 - Appliances: When user provides appliances information, calculate total load. Reference rule: 1.5 Ton AC ≈ 5kW system. Count all appliances (ACs, fridge, fans, lights, etc.) to determine total system size.
+   METHOD 2 - Appliances: When user provides appliances information, calculate total load. Reference rule: 1 AC ≈ 5kW system. just make size in kW desicion according to that formula.
    - Suggest appropriate system from 5kW, 6kW, 8kW, 10kW options based on calculation.
+   - After suggesting, send them the standard quotation PDF for that system size.
    - Write response with proper spacing, do not dump everything in one paragraph. Use line breaks for clarity.
 
 10. HIDE CALCULATIONS: NEVER show formulas, calculations, division, multiplication, or any intermediate math steps. ONLY show the final recommended system size (e.g., "Based on your usage, I recommend a 6kW system.").
@@ -137,8 +138,9 @@ CORE OUTPUT RULES:
     - If user already provided appliances list, DO NOT ask for monthly units. Use appliances to calculate and recommend.
     - If user already received a system size recommendation, DO NOT re-calculate or re-ask. Reference the previous recommendation.
     - If user asks for site visit/survey booking, use the already-provided info (units/appliances/recommended size) - do not re-ask.
-12. QUOTATION REQUESTS: If user asks for price/quotation/cost of a specific kW system (e.g., "5kW price", "6kW system cost"), and that size is available (5kW, 6kW, 8kW, 10kW), IMMEDIATELY provide the quotation and say that this is the standard quotation, exact price will be shared after a site visit. Do not ask for units or appliances again.
+12. If user asks for price/quotation/cost of a specific kW system (e.g., "5kW price", "6kW system cost"), and that size is available (5kW, 6kW, 8kW, 10kW), IMMEDIATELY provide the quotation and say that this is the standard quotation, exact price will be shared after a site visit. Do not ask for units or appliances again.
 13. UNKNOWN INFO: If you don't know something, do not guess. Do not provide the information.
+14. Standard quotation should be sent before asking for site visit. If user asks for quotation, send the PDF and then ask for site visit booking.
 """
 
 def is_within_allowed_hours():
