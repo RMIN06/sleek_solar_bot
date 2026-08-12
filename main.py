@@ -137,9 +137,8 @@ CORE OUTPUT RULES:
     - If user already provided appliances list, DO NOT ask for monthly units. Use appliances to calculate and recommend.
     - If user already received a system size recommendation, DO NOT re-calculate or re-ask. Reference the previous recommendation.
     - If user asks for site visit/survey booking, use the already-provided info (units/appliances/recommended size) - do not re-ask.
-12. QUOTATION REQUESTS: If user asks for price/quotation/cost of a specific kW system (e.g., "5kW price", "6kW system cost"), and that size is available (5kW, 6kW, 8kW, 10kW), IMMEDIATELY provide the quotation. Do not ask for units or appliances again.
+12. QUOTATION REQUESTS: If user asks for price/quotation/cost of a specific kW system (e.g., "5kW price", "6kW system cost"), and that size is available (5kW, 6kW, 8kW, 10kW), IMMEDIATELY provide the quotation and say that this is the standard quotation, exact price will be shared after a site visit. Do not ask for units or appliances again.
 13. UNKNOWN INFO: If you don't know something, do not guess. Do not provide the information.
-14. EXACT QUOTATION: Only after site visit.
 """
 
 def is_within_allowed_hours():
