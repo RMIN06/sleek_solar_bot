@@ -95,9 +95,14 @@ def detect_quotation_request(text):
     return None, None
 
 def detect_distributor_inquiry(text):
-    """Detect if user is asking about distributorship"""
-    distributor_keywords = ['distributor', 'dealership', 'dealer', 'partnership', 'wholesale', 'distributer', 'distributorship']
-    return any(kw in text.lower() for kw in distributor_keywords)
+    """Detect if user is asking about distributorship or wants to sell/become retailer"""
+    # Trigger for explicit distributorship/dealership/partnership requests
+    # ALSO trigger for retail/selling intent phrases like "sell batteries", "become retailer"
+    distributor_keywords = ['distributor', 'dealership', 'dealer', 'partnership', 'wholesale', 'distributer', 'distributorship', 'distributor ban', 'distributor banna', 'distributor kaise']
+    retail_keywords = ['sell your', 'sell batteries', 'sell products', 'become retailer', 'retailer ban', 'retailer banna', 'want to sell', 'selling your', 'reseller', 'retail business']
+    text_lower = text.lower()
+
+    return any(kw in text_lower for kw in distributor_keywords) or any(kw in text_lower for kw in retail_keywords)
 
 def detect_loan_inquiry(text):
     """Detect if user is asking about loan/financing"""
@@ -125,8 +130,18 @@ CORE OUTPUT RULES:
 7. PRICING: NEVER state any price/cost/rupee figure in text. PDFs handle pricing.
 8. LOAN: If asked about loan/financing/installment, say: "Loaning can be done through JS Bank."
 9. SYSTEM SIZING - TWO METHODS:
-   METHOD 1 - Monthly Units: When user asks for solar/system for their house, FIRST ask for their monthly average electricity units (kWh). Calculate recommended kW using: Monthly Average Units / 120 = Recommended System kW.
-   METHOD 2 - Appliances: When user provides appliances information, calculate total load. Reference rule: one AC = 5kW system. just make recomendation in kW according to that formula. if user asks for 3ac, it means 3*5kW = 15kW, so recommend 15kW system. before making final recommendation, also include other appliances like fridge, lights, fans, etc. in the calculation. so you can provide 5,6,8,10kW quotation accordingly. Quotation for bigger systems are sent only after site visit
+   METHOD 1 - Monthly Units: When user asks for solar/system for their house, FIRST ask for their monthly average electricity units (kWh). Calculate recommended kW using: Monthly Average Units / 120 = Recommended System kW. Round up to nearest available size (5kW, 6kW, 8kW, 10kW).
+   METHOD 2 - Appliances: When user provides appliances information, calculate total load using these standard wattages:
+   - 1 AC (any tonnage): 1800 watts
+   - 1 Fan: 80 watts
+   - 1 Fridge/Refrigerator: 150 watts
+   - 1 Motor/Water Pump: 750 watts
+   - 1 TV: 100 watts
+   - 1 Washing Machine: 500 watts
+   - Lights (per bulb): 10 watts
+   Sum all appliance watts, then divide by 1000 to get kW. Round up to nearest available system size (5kW, 6kW, 8kW, 10kW).
+   Example: 1 AC (1800W) + 3 Fans (240W) + 1 Motor/Pump (750W) + 1 Fridge (150W) = 2940W ≈ 3kW → Recommend 5kW system (minimum available).
+   For loads above 10kW, recommend site visit for custom quotation.
    - Suggest appropriate system from 5kW, 6kW, 8kW, 10kW options based on calculation.
    - After suggesting, send them the standard quotation PDF for that system size.
    - Write response with proper spacing, do not dump everything in one paragraph. Use line breaks for clarity.
@@ -193,7 +208,7 @@ def send_overnight_summary(author_number):
 def detect_site_visit_request(text):
     """Detect if user is asking about or wants to book a site visit"""
     site_visit_keywords = ['site visit', 'site survey', 'visit', 'survey', 'come to', 'come over',
-                          'site inspection', 'property visit', 'home visit']
+                          'site inspection', 'property visit', 'home visit', 'book survey', 'book visit']
     text_lower = text.lower()
     return any(keyword in text_lower for keyword in site_visit_keywords)
 
@@ -252,7 +267,7 @@ def handle_site_visit_request(sender_phone, msg_text):
         site_visit_state[sender_phone] = "completed"
 
         send_whatsapp_message(sender_phone,
-            f"Site visit request confirmed!\nName: {site_visit_requests[sender_phone]['name']}\nLocation: {site_visit_requests[sender_phone]['location']}\n\nHumari team aap se jald hi contact karegi. Shukriya!\n\nSleek Bot")
+            f"Apka site survey book ho gaya hai!\nNaam: {site_visit_requests[sender_phone]['name']}\nLocation: {site_visit_requests[sender_phone]['location']}\n\nHumari team aap se jald hi contact karegi taake date aur time finalize ki ja sake. Shukriya!\n\nSleek Bot")
         return
 
     else:
@@ -261,7 +276,7 @@ def handle_site_visit_request(sender_phone, msg_text):
         site_visit_requests[sender_phone] = {}
 
         # Use context in the response
-        response = "Site visit ke liye shukriya! "
+        response = "Site survey ke liye shukriya! "
         if context_parts:
             response += f"Mere paas aap ki pehle ki information hai ({context_str}). "
         response += "Baraye meherbani apna naam batayen.\n\nSleek Bot"
@@ -294,13 +309,12 @@ TASK:
 Examine this electricity bill image carefully.
 1. Extract the monthly consumed units from the bill.
 2. Calculate the required system size internally (Monthly Average Units / 120).
-3. Reference rule for validation: 1.5 Ton AC ≈ 5kW system.
-4. Recommend appropriate system size from 5kW, 6kW, 8kW, 10kW options based on calculation.
-5. Reply in user's language (English or Roman Urdu only).
-6. Be extremely concise and specific.
-7. Do NOT mention any prices.
-8. NEVER show formulas, calculations, or intermediate math steps - ONLY the final recommendation.
-9. Ensure the message ends with a blank line then 'Sleek Bot'."""
+3. Recommend appropriate system size from 5kW, 6kW, 8kW, 10kW options based on calculation. Round up to nearest available size.
+4. Reply in user's language (English or Roman Urdu only).
+5. Be extremely concise and specific.
+6. Do NOT mention any prices.
+7. NEVER show formulas, calculations, or intermediate math steps - ONLY the final recommendation.
+8. Ensure the message ends with a blank line then 'Sleek Bot'."""
 
         messages = history_messages + [
             {
@@ -387,9 +401,9 @@ def get_text_response(msg_text, sender_phone):
 TASK:
 Provide a clear, direct, polite, and extremely concise answer.
 - If user asks for solar/system for house: check context first. If units/appliances already provided, use them to recommend. Only ask if NOT in context.
-- If user provides units: calculate internally using Monthly Units / 120, cross-check with AC rule (1.5 Ton AC ≈ 5kW).
-- If user provides appliances: calculate total load including all appliances.
-- Suggest appropriate system (5kW, 6kW, 8kW, 10kW) based on calculation.
+- If user provides units: calculate internally using Monthly Units / 120.
+- If user provides appliances: calculate total load using standard wattages (AC=1800W, Fan=80W, Fridge=150W, Motor/Pump=750W, TV=100W, Washing Machine=500W, Lights=10W each).
+- Suggest appropriate system (5kW, 6kW, 8kW, 10kW) based on calculation. Round up to nearest available size.
 - Do NOT provide any prices.
 - Do NOT mention brands/products user didn't ask about.
 - Match user's language (English or Roman Urdu only).
